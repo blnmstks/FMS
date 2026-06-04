@@ -1,9 +1,9 @@
-from langgraph.types import Command
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.types import Command
 
-from app.graph import build_app
 from app.config import DB_URL, THREAD_ID
 from app.db import fetch_channel_info, upsert_channel_info
+from app.graph import build_app
 
 config = {"configurable": {"thread_id": THREAD_ID}}
 

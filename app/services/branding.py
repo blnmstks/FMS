@@ -1,10 +1,10 @@
 import json
 import random
 
-from app.infrastructure.llm_client import get_client
 from app.config import DEFAULT_MODEL
-from app.utils.images import encode_images
+from app.infrastructure.llm_client import get_client
 from app.prompts.branding import DEFINE_BRAND_ID_PROMPT
+from app.utils.images import encode_images
 
 
 def analyze_channel(channel_name: str, screenshot_paths: list[str]) -> dict:

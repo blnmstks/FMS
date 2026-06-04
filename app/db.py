@@ -1,4 +1,5 @@
 import psycopg
+
 from app.config import DB_URL
 
 

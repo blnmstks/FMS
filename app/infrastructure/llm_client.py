@@ -1,5 +1,7 @@
 from openai import OpenAI
+
 from app.config import OPENROUTER_API_KEY
+
 
 def get_client() -> OpenAI:
     return OpenAI(

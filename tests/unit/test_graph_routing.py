@@ -1,4 +1,5 @@
 import pytest
+
 from app.graph import _route_s1
 
 

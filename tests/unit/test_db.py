@@ -1,6 +1,5 @@
 import pytest
 
-
 FULL_ROW = ("MyChannel", "A great channel", "https://avatar.png", "https://banner.png")
 EXPECTED_FULL = {
     "channel_name": "MyChannel",

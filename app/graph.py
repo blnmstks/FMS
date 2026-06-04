@@ -1,8 +1,8 @@
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.state import ProjectState
 from app.services.branding import analyze_channel
+from app.state import ProjectState
 
 
 def s1_channel(state: ProjectState) -> dict:

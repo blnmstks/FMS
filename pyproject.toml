@@ -19,7 +19,19 @@ dev = [
     "pytest>=8.0",
     "pytest-mock>=3.14",
     "testcontainers[postgres]>=4.8",
+    "ruff>=0.4",
 ]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes: неиспользуемые импорты, переменные
+    "I",  # isort: порядок импортов
+]
+ignore = ["E501"]  # длину строки контролирует форматтер
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
