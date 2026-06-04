@@ -9,7 +9,6 @@ repos:
     hooks:
       - id: pytest-unit
         name: pytest (unit)
-        # language: system uses the active venv where pip install -e .[dev] was run
         entry: pytest tests/unit/
         language: system
         pass_filenames: false

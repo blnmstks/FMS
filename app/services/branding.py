@@ -33,7 +33,7 @@ def analyze_channel(channel_name: str, screenshot_paths: list[str]) -> dict:
         f"total: {usage.total_tokens} tokens"
     )
 
-    brief = json.loads(response.choices[0].message.content)
+    brief, _ = json.JSONDecoder().raw_decode(response.choices[0].message.content.strip())
     return {
         "channel_name": random.choice(brief["channel_name_variants"]),
         "channel_description": random.choice(brief["channel_description_variants"]),

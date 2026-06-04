@@ -12,3 +12,7 @@ class ProjectState(TypedDict, total=False):
     channel_info_complete: bool
     # для опционального второго шага - нужно ли анализоровать скриншоты для определения брендинга
     use_screenshots: bool
+    # step 3: style analysis results
+    channel_style: dict
+    channel_style_complete: bool
+    transcript_obsidian_files: list[str]

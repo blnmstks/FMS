@@ -7,3 +7,4 @@ DB_URL = os.environ["DB_URL"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 DEFAULT_MODEL = os.environ["DEFAULT_MODEL"]
 THREAD_ID = "proj-1"
+VAULT_PATH = os.environ.get("VAULT_PATH", "vault")

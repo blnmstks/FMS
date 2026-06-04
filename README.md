@@ -30,3 +30,6 @@ Check the project:
 
 Auto-fix
 `ruff check . --fix`
+
+Fix as black:
+`ruff format .`
