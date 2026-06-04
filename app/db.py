@@ -6,6 +6,16 @@ from app.config import DB_URL
 
 # Единственный источник истины для названий колонок стилистики.
 # Используется в db.py (SQL), graph.py (подсказки пользователю) и services/transcripts.py (парсинг).
+IDEAS_STATUSES = [
+    "scenario_finished",
+    "clips_visual_style_finished",
+    "image_prompt_finished",
+    "av_prompts_finished",
+    "audio_generated",
+    "clips_generated",
+    "video_done",
+]
+
 STYLE_FIELDS = [
     "niche",
     "target_audience",
@@ -22,6 +32,27 @@ STYLE_FIELDS = [
     "average_word_count",
     "target_word_count",
 ]
+
+
+def migrate_ideas_table() -> None:
+    enum_values = ", ".join(f"'{s}'" for s in IDEAS_STATUSES)
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                DO $$ BEGIN
+                    CREATE TYPE idea_status AS ENUM ({enum_values});
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ideas (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT,
+                    status idea_status
+                )
+            """)
+        conn.commit()
 
 
 def fetch_channel_info() -> dict:

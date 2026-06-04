@@ -74,3 +74,22 @@ def test_upsert_twice_updates_not_duplicates(pg_container, monkeypatch):
     with psycopg.connect(pg_container) as conn:
         count = conn.execute("SELECT COUNT(*) FROM channel_info").fetchone()[0]
     assert count == 1
+
+
+@pytest.mark.integration
+def test_migrate_ideas_table_creates_table(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+
+    with psycopg.connect(pg_container) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM ideas").fetchone()[0]
+    assert count == 0

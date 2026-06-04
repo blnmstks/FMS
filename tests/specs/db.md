@@ -105,3 +105,25 @@ Saves style analysis fields. If a row already exists — UPDATE; otherwise — I
 - **existing row**: mock `fetchone()` returns `(1,)` → UPDATE called, INSERT not called
 - **new row**: mock `fetchone()` returns `None` → INSERT called, UPDATE not called
 - **commit called**: `conn.commit()` called exactly once in both cases
+
+---
+
+## `migrate_ideas_table() -> None`
+
+### Contract
+Создаёт ENUM-тип `idea_status` и таблицу `ideas`, если они ещё не существуют.
+
+SQL, который выполняется:
+1. `CREATE TYPE IF NOT EXISTS idea_status AS ENUM ('scenario_finished', 'clips_visual_style_finished', 'image_prompt_finished', 'av_prompts_finished', 'audio_generated', 'clips_generated', 'video_done')`
+2. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
+
+Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Безопасно запускать многократно (оба оператора с IF NOT EXISTS — идемпотентна).
+2. Всегда коммитит.
+
+### Test cases
+- **выполняет CREATE TYPE**: `cur.execute` вызывается с SQL содержащим `CREATE TYPE IF NOT EXISTS idea_status`
+- **выполняет CREATE TABLE**: `cur.execute` вызывается с SQL содержащим `CREATE TABLE IF NOT EXISTS ideas`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз

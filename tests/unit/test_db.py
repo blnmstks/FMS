@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.db import STYLE_FIELDS
+from app.db import IDEAS_STATUSES, STYLE_FIELDS
 
 FULL_ROW = ("MyChannel", "A great channel", "https://avatar.png", "https://banner.png")
 FULL_STYLE_ROW = tuple(f"val_{f}" for f in STYLE_FIELDS) + (json.dumps(["note1.md"]),)
@@ -188,3 +188,37 @@ def test_upsert_style_calls_insert_when_no_row(mock_psycopg_connect):
     assert any("INSERT" in c for c in calls)
     assert not any("UPDATE" in c for c in calls)
     mock_conn.commit.assert_called_once()
+
+
+# --- migrate_ideas_table ---
+
+
+@pytest.mark.unit
+def test_migrate_ideas_table_creates_enum_and_table(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_ideas_table
+
+    migrate_ideas_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("idea_status" in c for c in calls)
+    assert any("CREATE TABLE IF NOT EXISTS ideas" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_ideas_table_enum_contains_all_statuses(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_ideas_table
+
+    migrate_ideas_table()
+
+    create_type_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "idea_status" in str(c) and "ideas" not in str(c)
+    )
+    for status in IDEAS_STATUSES:
+        assert status in create_type_call
