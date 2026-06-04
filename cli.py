@@ -1,17 +1,31 @@
 from langgraph.types import Command
-from app.graph import app
+from app.graph import build_app, DB_URL
 
-# thread_id - это идентификатор «сессии»: он связывает все вызовы invoke в один непрерывный проход.
+from langgraph.checkpoint.postgres import PostgresSaver
+
 config = {"configurable": {"thread_id": "proj-1"}}
 
-# первый вызов: граф идёт от START и встаёт на первом interrupt
-result = app.invoke({}, config)
+with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
+    checkpointer.setup()
+    app = build_app(checkpointer)
 
-while "__interrupt__" in result:
-    question = result["__interrupt__"][0].value
-    user_text = input(f"\n{question}\n> ")
-    # запускает граф с пустым состоянием. В result будет ключ __interrupt__ с вопросом
-    result = app.invoke(Command(resume=user_text), config)
+    # Проверяем, есть ли уже сохранённый checkpoint с активным interrupt
+    state = app.get_state(config)
+    if state and state.next:
+        # Продолжаем с того места, где остановились — не делаем новый invoke({})
+        interrupted = state.tasks[0].interrupts if state.tasks else []
+        if interrupted:
+            result = {"__interrupt__": interrupted}
+        else:
+            result = app.invoke(Command(resume=None), config)
+    else:
+        # Свежий запуск: граф идёт от START
+        result = app.invoke({}, config)
 
-print("\n--- готово, финальное состояние: ---")
-print(result)
+    while "__interrupt__" in result:
+        question = result["__interrupt__"][0].value
+        user_text = input(f"\n{question}\n> ")
+        result = app.invoke(Command(resume=user_text), config)
+
+    print("\n--- готово, финальное состояние: ---")
+    print(result)

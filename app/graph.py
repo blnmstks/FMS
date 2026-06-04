@@ -1,11 +1,13 @@
+import os
+from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 
-# checkpointer в оперативной памяти. На фазе 1 он держит состояние между остановкой и резюмом
-#  в рамках одного запуска процесса. В фазе 2 заменим его на Postgres, чтобы переживало рестарт
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
 from app.state import ProjectState
+
+load_dotenv()
+DB_URL = os.environ["DB_URL"]
 
 # узел - функция, принимающая текущее состояние и возвращающая словарь с обновлениями
 def s1_channel(state: ProjectState) -> dict:
@@ -28,4 +30,5 @@ g.add_edge(START, "s1")
 g.add_edge("s1", "s3")
 g.add_edge("s3", END)
 
-app = g.compile(checkpointer=MemorySaver())
+def build_app(checkpointer):
+    return g.compile(checkpointer=checkpointer)
