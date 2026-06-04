@@ -9,3 +9,5 @@ class ProjectState(TypedDict, total=False):
     channel_avatar: str
     channel_banner: str
     channel_info_complete: bool
+    # для опционального второго шага - нужно ли анализоровать скриншоты для определения брендинга
+    use_screenshots: bool
