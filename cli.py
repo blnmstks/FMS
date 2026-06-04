@@ -27,5 +27,7 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
         user_text = input(f"\n{question}\n> ")
         result = app.invoke(Command(resume=user_text), config)
 
+    checkpointer.delete_thread(config["configurable"]["thread_id"])
+
     print("\n--- готово, финальное состояние: ---")
     print(result)
