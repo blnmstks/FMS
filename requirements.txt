@@ -1,5 +1,0 @@
-langgraph>=0.2
-langgraph-checkpoint-postgres
-psycopg[binary]
-python-dotenv
-openai>=1.0
