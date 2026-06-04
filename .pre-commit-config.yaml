@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      - id: ruff         # lint + autofix
+      - id: ruff-format  # format (like black)
+
+  - repo: local
+    hooks:
+      - id: pytest-unit
+        name: pytest (unit)
+        # language: system uses the active venv where pip install -e .[dev] was run
+        entry: pytest tests/unit/
+        language: system
+        pass_filenames: false
+        always_run: true

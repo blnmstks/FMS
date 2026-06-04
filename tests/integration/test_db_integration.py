@@ -2,8 +2,8 @@ import pytest
 
 pytest.importorskip("testcontainers", reason="testcontainers not installed")
 
-import psycopg
-from testcontainers.postgres import PostgresContainer
+import psycopg  # noqa: E402
+from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 CHANNEL_DATA = {
     "channel_name": "IntegrationChannel",
@@ -37,8 +37,10 @@ def test_upsert_then_fetch_round_trip(pg_container, monkeypatch):
     import importlib
 
     import app.config as cfg
+
     importlib.reload(cfg)
     import app.db as db
+
     importlib.reload(db)
 
     db.upsert_channel_info(CHANNEL_DATA)
@@ -57,8 +59,10 @@ def test_upsert_twice_updates_not_duplicates(pg_container, monkeypatch):
     import importlib
 
     import app.config as cfg
+
     importlib.reload(cfg)
     import app.db as db
+
     importlib.reload(db)
 
     updated = {**CHANNEL_DATA, "channel_name": "UpdatedName"}

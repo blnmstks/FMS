@@ -16,7 +16,11 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
     state = app.get_state(config)
     if state and state.next:
         interrupted = state.tasks[0].interrupts if state.tasks else []
-        result = {"__interrupt__": interrupted} if interrupted else app.invoke(Command(resume=None), config)
+        result = (
+            {"__interrupt__": interrupted}
+            if interrupted
+            else app.invoke(Command(resume=None), config)
+        )
     else:
         result = app.invoke(initial_state, config)
 

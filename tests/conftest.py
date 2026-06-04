@@ -7,6 +7,7 @@ import pytest
 @pytest.fixture
 def mock_llm_response():
     """Returns a factory for fake LLM chat completion responses."""
+
     def _make(content: dict):
         response = MagicMock()
         response.choices[0].message.content = json.dumps(content)
@@ -14,6 +15,7 @@ def mock_llm_response():
         response.usage.completion_tokens = 5
         response.usage.total_tokens = 15
         return response
+
     return _make
 
 

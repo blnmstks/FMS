@@ -7,9 +7,9 @@ DEFINE_BRAND_ID_PROMPT = (
     "Target audience signal\n\n"
     "Then output only valid JSON (no commentary, no markdown):\n"
     "{\n"
-    "  \"channel_name_variants\": [\"name1\", \"name2\", \"name3\", \"name4\", \"name5\"],\n"
-    "  \"channel_description_variants\": [\"description1\", \"description2\"],\n"
-    "  \"channel_avatar_prompt\": \"logo generation prompt\",\n"
-    "  \"channel_banner_prompt\": \"banner generation prompt\"\n"
+    '  "channel_name_variants": ["name1", "name2", "name3", "name4", "name5"],\n'
+    '  "channel_description_variants": ["description1", "description2"],\n'
+    '  "channel_avatar_prompt": "logo generation prompt",\n'
+    '  "channel_banner_prompt": "banner generation prompt"\n'
     "}"
 )

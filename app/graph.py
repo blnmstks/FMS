@@ -29,25 +29,25 @@ def s1_channel(state: ProjectState) -> dict:
     )
     if choice.strip() == "2":
         return {"use_screenshots": True}
-    name        = interrupt("STATE 1 — Enter channel name:")
+    name = interrupt("STATE 1 — Enter channel name:")
     description = interrupt("STATE 1 — Enter channel description:")
-    avatar      = interrupt("STATE 1 — Enter avatar URL:")
-    banner      = interrupt("STATE 1 — Enter banner URL:")
+    avatar = interrupt("STATE 1 — Enter avatar URL:")
+    banner = interrupt("STATE 1 — Enter banner URL:")
     return {
-        "channel_name":          name,
-        "channel_description":   description,
-        "channel_avatar":        avatar,
-        "channel_banner":        banner,
+        "channel_name": name,
+        "channel_description": description,
+        "channel_avatar": avatar,
+        "channel_banner": banner,
         "channel_info_complete": True,
-        "use_screenshots":       False,
+        "use_screenshots": False,
     }
 
 
 def s2_branding(_: ProjectState) -> dict:
     channel_name = interrupt("STATE 2 — Enter the channel name to analyze:")
-    paths_raw    = interrupt("STATE 2 — Paste screenshot file paths (comma-separated):")
-    paths        = [p.strip() for p in paths_raw.split(",") if p.strip()]
-    result       = analyze_channel(channel_name, paths)
+    paths_raw = interrupt("STATE 2 — Paste screenshot file paths (comma-separated):")
+    paths = [p.strip() for p in paths_raw.split(",") if p.strip()]
+    result = analyze_channel(channel_name, paths)
     print(
         f"\nBranding brief generated:\n"
         f"  name:         {result['channel_name']}\n"

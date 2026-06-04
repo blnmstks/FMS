@@ -27,13 +27,22 @@ def upsert_channel_info(data: dict) -> None:
             if existing:
                 cur.execute(
                     "UPDATE channel_info SET name=%s, description=%s, avatar=%s, banner=%s WHERE id=%s",
-                    (data["channel_name"], data["channel_description"],
-                     data["channel_avatar"], data["channel_banner"], existing[0]),
+                    (
+                        data["channel_name"],
+                        data["channel_description"],
+                        data["channel_avatar"],
+                        data["channel_banner"],
+                        existing[0],
+                    ),
                 )
             else:
                 cur.execute(
                     "INSERT INTO channel_info (name, description, avatar, banner) VALUES (%s,%s,%s,%s)",
-                    (data["channel_name"], data["channel_description"],
-                     data["channel_avatar"], data["channel_banner"]),
+                    (
+                        data["channel_name"],
+                        data["channel_description"],
+                        data["channel_avatar"],
+                        data["channel_banner"],
+                    ),
                 )
         conn.commit()

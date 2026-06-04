@@ -6,8 +6,14 @@ Install all dependencies:
 Only prod deps:
 `pip install -e .`
 
+Install git hook:
+`pre-commit install`
+
 Launch project:
 `python cli.py`
+
+Launch git hooks without commit:
+`pre-commit run --all-files`
 
 ## Tests
 
@@ -24,4 +30,3 @@ Check the project:
 
 Auto-fix
 `ruff check . --fix`
-ruff format .           # отформатировать (как black)

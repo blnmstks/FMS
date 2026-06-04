@@ -20,6 +20,7 @@ dev = [
     "pytest-mock>=3.14",
     "testcontainers[postgres]>=4.8",
     "ruff>=0.4",
+    "pre-commit>=3.7",
 ]
 
 [tool.ruff]

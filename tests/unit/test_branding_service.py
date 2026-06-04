@@ -67,6 +67,7 @@ def test_analyze_channel_invalid_json_raises(mock_llm_response):
     ):
         mock_get_client.return_value.chat.completions.create.return_value = bad_response
         from app.services.branding import analyze_channel
+
         with pytest.raises(json.JSONDecodeError):
             analyze_channel("TestChannel", ["fake/path.png"])
 
@@ -81,5 +82,6 @@ def test_analyze_channel_missing_key_raises(mock_llm_response):
     ):
         mock_get_client.return_value.chat.completions.create.return_value = empty_response
         from app.services.branding import analyze_channel
+
         with pytest.raises(KeyError):
             analyze_channel("TestChannel", ["fake/path.png"])
