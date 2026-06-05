@@ -192,6 +192,42 @@ def test_update_idea_status_advances_and_clears_raw_idea(pg_container, monkeypat
 
 
 @pytest.mark.integration
+def test_insert_image_prompt_links_to_scenario_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_image_prompts_table()
+
+    db.insert_idea("Idea for image prompt", "clips_visual_style_finished")
+    idea_id = db.fetch_idea_by_status("clips_visual_style_finished")["idea_id"]
+    db.insert_scenario("A scenario for beats.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+
+    prompt = {f: f"val_{f}" for f in db.IMAGE_PROMPT_FIELDS}
+    db.insert_image_prompt(prompt, scenario_id)
+
+    with psycopg.connect(pg_container) as conn:
+        row = conn.execute(
+            "SELECT image_prompt, action, scenario FROM image_prompts WHERE scenario = %s",
+            (scenario_id,),
+        ).fetchone()
+    assert row == ("val_image_prompt", "val_action", scenario_id)
+
+
+@pytest.mark.integration
 def test_dispatch_helpers_round_trip(pg_container, monkeypatch):
     monkeypatch.setenv("DB_URL", pg_container)
     import importlib

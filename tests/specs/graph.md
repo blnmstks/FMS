@@ -2,8 +2,8 @@
 
 Начиная с шага 5, маршрут определяется статусами идей в таблице `ideas`. Соответствие
 статус → шаг линейное (из `IDEAS_STATUSES`): `raw_idea→5`, `scenario_finished→6`,
-`clips_visual_style_finished→7`, `image_prompt_finished→8`, `av_prompts_finished→9`,
-`audio_generated→10`, `clips_generated→11`, `video_done→12`.
+`clips_visual_style_finished→7`, `image_prompt_finished→8`, `image_generated→9`,
+`av_prompts_finished→10`, `audio_generated→11`, `clips_generated→12`, `video_done→13`.
 
 ## `STEP_BY_STATUS`
 Словарь `{status: 5 + index}` из `IDEAS_STATUSES` (единственный источник истины — порядок
@@ -23,7 +23,8 @@
 - свой приоритетнее: `({"raw_idea", "audio_generated"}, 5) == 5`
 - самый ранний предыдущий: `({"scenario_finished", "clips_visual_style_finished"}, 9) == 6`
 - предыдущий, когда своего нет: `({"raw_idea"}, 8) == 5`
-- только последующие: `({"audio_generated"}, 5) == 10`
+- только последующие: `({"audio_generated"}, 5) == 11`
+- image_generated → шаг 9: `({"image_generated"}, 8) == 9`
 - нет идей: `(set(), 5) == 4`
 
 ## `dispatch(state) -> dict`
@@ -102,21 +103,60 @@
   `6 in executed_steps`
 - идеи нет: `pipeline_step == 7`, `6 in executed_steps`; LLM и `insert_characters` не вызваны
 
-## Стабы шагов 7–12 — фабрика `_make_stub(n)`
+## `s7_image_prompt(state) -> dict`
+Шаг 7: по идее со статусом `clips_visual_style_finished` генерирует через ИИ image-prompt
+**первого бита** сценария и сохраняет его в `image_prompts` (привязка к сценарию), переводит
+идею в `image_prompt_finished`. Узел самодостаточен (не доверяет state).
+
+Поток:
+- `idea = fetch_idea_by_status("clips_visual_style_finished")`; если `not idea["exists"]` —
+  защитный `_advance(state, 7)` без работы (и без `interrupt`);
+- `answer = interrupt("STATE 7 — Already have first beat img? (y/n)")`;
+- **ветка «yes»** (`answer.strip().lower() in ("y", "yes")`): картинка уже есть — генерации и
+  записи в `image_prompts` нет; `update_idea_status(idea_id, "image_generated")` (пропуск шага 8 —
+  диспетчер по статусу `image_generated` уводит на шаг 9), `_advance(state, 7, {idea_id, idea_name})`;
+- **ветка «no»**:
+  - `scenario_row = (fetch_rows("scenarios","idea", idea_id) or [{}])[0]`;
+    `scenario_text = scenario_row.get("scenario","")`, `scenario_id = scenario_row.get("id")`;
+  - `visual_row = (fetch_rows("visual_styles","idea", idea_id) or [{}])[0]`;
+    `visual_style = {f: visual_row.get(f) for f in VISUAL_STYLE_FIELDS}`;
+  - `characters = fetch_rows("characters_sheet","scenario", scenario_id)` если `scenario_id`, иначе `[]`;
+  - `prompt = generate_image_prompt(scenario_text, visual_style, characters)`;
+  - если `scenario_id is not None`: `insert_image_prompt(prompt, scenario_id)`, затем
+    `update_idea_status(idea_id, "image_prompt_finished")` (порядок строгий — статус меняется
+    ТОЛЬКО после успешного сохранения; при ошибке `insert` исключение пробрасывается, статус и
+    курсор не двигаются);
+  - `_advance(state, 7, {idea_id, idea_name})`.
+
+`interrupt` стоит ПОСЛЕ guard'а (как в s6): read-операции до него идемпотентны при resume,
+а LLM-вызов и запись идут только после ответа.
+
+### Test cases
+- «no», идея есть (мок `fetch_idea_by_status`→idea, `interrupt`→"n", `fetch_rows`→строки для
+  scenarios/visual_styles/characters, `generate_image_prompt`→5 полей): вызваны
+  `insert_image_prompt(prompt, scenario_id)` и
+  `update_idea_status(idea_id, "image_prompt_finished")`; `pipeline_step == 8`,
+  `7 in executed_steps`
+- «yes»: `insert_image_prompt`/`generate_image_prompt` НЕ вызваны; вызван
+  `update_idea_status(idea_id, "image_generated")`; `pipeline_step == 8`, `7 in executed_steps`
+- идеи нет: `pipeline_step == 8`, `7 in executed_steps`; `interrupt` и `generate_image_prompt`
+  не вызваны
+
+## Стабы шагов 8–13 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(7)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 8`,
-  `7 in executed_steps`; в stdout `STATE 7`
+- `_make_stub(8)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 9`,
+  `8 in executed_steps`; в stdout `STATE 8`
 
 ## Поток графа
 ```
 START → s1 → (s2) → s3 → dispatch
-dispatch → _route_dispatch → s4 | s5..s12 | END
+dispatch → _route_dispatch → s4 | s5..s13 | END
 s4 → _route_s4 → s4_pick | dispatch
 s4_pick → dispatch
-s5..s12 → dispatch
+s5..s13 → dispatch
 ```
 `_route_s4`: `generated_ideas` есть → `"s4_pick"`, иначе → `"dispatch"`.
 `_route_s5` удалён (его роль перешла диспетчеру).

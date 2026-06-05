@@ -152,7 +152,7 @@ SQL, который выполняется:
 2. Для каждого значения из `IDEAS_STATUSES`: `ALTER TYPE idea_status ADD VALUE IF NOT EXISTS '<value>'` — добавляет недостающие значения в уже существующий тип.
 3. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
 
-`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `av_prompts_finished`, `audio_generated`, `clips_generated`, `video_done`.
+`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `av_prompts_finished`, `audio_generated`, `clips_generated`, `video_done`.
 
 Всегда вызывает `conn.commit()`.
 
@@ -311,6 +311,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
 - `("visual_styles", "idea", "ideas")`
 - `("scenarios", "idea", "ideas")`
 - `("characters_sheet", "scenario", "scenarios")`
+- `("image_prompts", "scenario", "scenarios")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -501,5 +502,61 @@ scenario) VALUES (%s,%s,%s,%s,%s,%s)`.
   `INSERT INTO characters_sheet`; в параметрах первого INSERT `name="Jack"` и последний
   параметр — `scenario_id`
 - **пустой список**: только `DELETE`, нет `INSERT`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## Константа `IMAGE_PROMPT_FIELDS`
+Единственный источник истины для колонок image-prompt первого бита (таблица `image_prompts`):
+`image_prompt`, `camera_angle`, `lighting`, `mood`, `action`. Используется в
+`migrate_image_prompts_table` (DDL) и `insert_image_prompt` (значения).
+
+---
+
+## `migrate_image_prompts_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `image_prompts` (image-prompt первого бита, привязка к сценарию).
+Запускать после миграции `scenarios` (FK `scenario`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS image_prompts (
+    id SERIAL PRIMARY KEY,
+    image_prompt TEXT, camera_angle TEXT, lighting TEXT, mood TEXT, action TEXT,
+    scenario INTEGER REFERENCES scenarios(id)
+)
+```
+Колонки полей генерируются из `IMAGE_PROMPT_FIELDS`. Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Все колонки из `IMAGE_PROMPT_FIELDS` присутствуют в DDL.
+3. Колонка `scenario` — FK на `scenarios(id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS image_prompts`
+- **все поля**: SQL содержит каждое имя из `IMAGE_PROMPT_FIELDS`
+- **FK на scenarios**: SQL содержит `REFERENCES scenarios`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `insert_image_prompt(prompt: dict, scenario_id: int) -> None`
+
+### Contract
+Вставляет сгенерированный image-prompt первого бита, связывая его со сценарием:
+`INSERT INTO image_prompts (<IMAGE_PROMPT_FIELDS>, scenario) VALUES (...)`. Значения:
+`[prompt.get(f) for f in IMAGE_PROMPT_FIELDS] + [scenario_id]`. Всегда `conn.commit()`.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Всегда `INSERT` (без проверки существования) — каждый prompt новая строка.
+3. Последний параметр — `scenario_id`.
+
+### Test cases
+- **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO image_prompts`
+- **последний параметр — scenario_id**: параметры INSERT заканчиваются `scenario_id`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 

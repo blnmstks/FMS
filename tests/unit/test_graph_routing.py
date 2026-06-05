@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 from langgraph.graph import END
 
-from app.db import VISUAL_STYLE_FIELDS
+from app.db import IMAGE_PROMPT_FIELDS, VISUAL_STYLE_FIELDS
 from app.graph import (
     _make_stub,
     _route_dispatch,
@@ -12,6 +12,7 @@ from app.graph import (
     dispatch,
     s5_scenario,
     s6_visual_style,
+    s7_image_prompt,
     select_target_step,
 )
 
@@ -73,7 +74,13 @@ def test_select_target_step_previous_when_no_own():
 
 @pytest.mark.unit
 def test_select_target_step_nearest_following():
-    assert select_target_step({"audio_generated"}, 5) == 10
+    assert select_target_step({"audio_generated"}, 5) == 11
+
+
+@pytest.mark.unit
+def test_select_target_step_image_generated_targets_step_nine():
+    # «yes»-ветка шага 7 выставляет image_generated → шаг 9 (минуя шаг 8).
+    assert select_target_step({"image_generated"}, 8) == 9
 
 
 @pytest.mark.unit
@@ -208,15 +215,86 @@ def test_s6_visual_style_advances_without_work_when_no_idea():
     assert 6 in result["executed_steps"]
 
 
-# --- stub factory s7..s12 ---
+# --- s7_image_prompt ---
+
+
+def _fetch_rows_for_s7(table, column, value):
+    return {
+        "scenarios": [{"id": 3, "scenario": "SCEN"}],
+        "visual_styles": [{f: f"vs_{f}" for f in VISUAL_STYLE_FIELDS}],
+        "characters_sheet": [{"label": "Jack"}],
+    }[table]
+
+
+@pytest.mark.unit
+def test_s7_image_prompt_no_branch_generates_saves_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    prompt = {f: f"val_{f}" for f in IMAGE_PROMPT_FIELDS}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.interrupt", return_value="n"),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s7),
+        patch("app.graph.generate_image_prompt", return_value=prompt) as gen,
+        patch("app.graph.insert_image_prompt") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s7_image_prompt({})
+
+    gen.assert_called_once()
+    expected_style = {f: f"vs_{f}" for f in VISUAL_STYLE_FIELDS}
+    assert gen.call_args.args == ("SCEN", expected_style, [{"label": "Jack"}])
+    ins.assert_called_once_with(prompt, 3)
+    upd.assert_called_once_with(7, "image_prompt_finished")
+    assert result["pipeline_step"] == 8
+    assert 7 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s7_image_prompt_yes_branch_skips_to_step_nine():
+    # «yes»: картинка уже есть — генерации/записи нет, статус → image_generated (минуя шаг 8).
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.interrupt", return_value="y"),
+        patch("app.graph.generate_image_prompt") as gen,
+        patch("app.graph.insert_image_prompt") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s7_image_prompt({})
+
+    gen.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_called_once_with(7, "image_generated")
+    assert result["pipeline_step"] == 8
+    assert 7 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s7_image_prompt_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.interrupt") as itr,
+        patch("app.graph.generate_image_prompt") as gen,
+        patch("app.graph.insert_image_prompt") as ins,
+    ):
+        result = s7_image_prompt({})
+
+    itr.assert_not_called()
+    gen.assert_not_called()
+    ins.assert_not_called()
+    assert result["pipeline_step"] == 8
+    assert 7 in result["executed_steps"]
+
+
+# --- stub factory s8..s12 ---
 
 
 @pytest.mark.unit
 def test_make_stub_prints_and_advances(capsys):
-    stub = _make_stub(7)
+    stub = _make_stub(8)
     with patch("app.graph.fetch_idea_by_status", return_value={"idea_name": "X", "exists": True}):
         result = stub({})
 
-    assert result["pipeline_step"] == 8
-    assert 7 in result["executed_steps"]
-    assert "STATE 7" in capsys.readouterr().out
+    assert result["pipeline_step"] == 9
+    assert 8 in result["executed_steps"]
+    assert "STATE 8" in capsys.readouterr().out

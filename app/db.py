@@ -12,6 +12,7 @@ IDEAS_STATUSES = [
     "scenario_finished",
     "clips_visual_style_finished",
     "image_prompt_finished",
+    "image_generated",
     "av_prompts_finished",
     "audio_generated",
     "clips_generated",
@@ -46,6 +47,15 @@ VISUAL_STYLE_FIELDS = [
     "mood",
 ]
 
+# Единственный источник истины для колонок image-prompt первого бита (таблица image_prompts).
+IMAGE_PROMPT_FIELDS = [
+    "image_prompt",
+    "camera_angle",
+    "lighting",
+    "mood",
+    "action",
+]
+
 # Реестр FK-рёбер графа данных: (таблица-потомок, колонка-FK, таблица-родитель),
 # смысл — child.<fk_column> -> parent.id. Единственный источник истины для fetch_related.
 # ВАЖНО: имена таблиц/колонок берутся ТОЛЬКО отсюда (доверенный whitelist), никогда из
@@ -55,6 +65,7 @@ RELATION_EDGES = [
     ("visual_styles", "idea", "ideas"),
     ("scenarios", "idea", "ideas"),
     ("characters_sheet", "scenario", "scenarios"),
+    ("image_prompts", "scenario", "scenarios"),
 ]
 
 
@@ -208,6 +219,39 @@ def insert_characters(characters: list[dict], scenario_id: int) -> None:
                         scenario_id,
                     ),
                 )
+        conn.commit()
+
+
+def migrate_image_prompts_table() -> None:
+    # Идемпотентно создаёт таблицу image_prompts (image-prompt первого бита, привязка к сценарию).
+    # Колонки полей берутся из IMAGE_PROMPT_FIELDS; scenario — FK на scenarios(id).
+    # Запускать после миграции scenarios. Безопасно запускать многократно.
+    field_cols = ",\n                    ".join(f"{f} TEXT" for f in IMAGE_PROMPT_FIELDS)
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS image_prompts (
+                    id SERIAL PRIMARY KEY,
+                    {field_cols},
+                    scenario INTEGER REFERENCES scenarios(id)
+                )
+            """)
+        conn.commit()
+
+
+def insert_image_prompt(prompt: dict, scenario_id: int) -> None:
+    # Вставляет сгенерированный image-prompt первого бита, связывая его со сценарием.
+    # Формат prompt — из ответа LLM: ключи IMAGE_PROMPT_FIELDS. Каждый вызов — новая строка.
+    cols = IMAGE_PROMPT_FIELDS + ["scenario"]
+    values = [prompt.get(f) for f in IMAGE_PROMPT_FIELDS] + [scenario_id]
+    col_clause = ", ".join(cols)
+    placeholders = ", ".join(["%s"] * len(cols))
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO image_prompts ({col_clause}) VALUES ({placeholders})",
+                values,
+            )
         conn.commit()
 
 

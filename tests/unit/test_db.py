@@ -671,8 +671,8 @@ def test_fetch_related_collects_children_for_parent_source(mock_psycopg_connect)
 def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
     _, _, mock_cursor = mock_psycopg_connect
     # scenarios — источник-потомок (ребро scenarios→ideas) и одновременно родитель для
-    # characters_sheet (ребро characters_sheet→scenarios).
-    # fetch_row_by_id: сценарий с idea=7, затем строка идеи; fetch_rows(characters) → [].
+    # characters_sheet и image_prompts (рёбра ...→scenarios).
+    # fetch_row_by_id: сценарий с idea=7, затем строка идеи; fetch_rows(children) → [].
     mock_cursor.description = [("id",), ("scenario",), ("idea",)]
     mock_cursor.fetchone.side_effect = [(5, "text", 7), (7, "name", "raw_idea")]
     mock_cursor.fetchall.return_value = []
@@ -683,7 +683,7 @@ def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
 
     assert result["source"]["idea"] == 7
     assert result["parents"]["ideas"]["id"] == 7
-    assert result["children"] == {"characters_sheet": []}
+    assert result["children"] == {"characters_sheet": [], "image_prompts": []}
 
 
 # --- migrate_characters_sheet_table ---
@@ -768,3 +768,69 @@ def test_insert_characters_empty_list_only_deletes(mock_psycopg_connect):
     assert any("DELETE FROM characters_sheet" in c for c in calls)
     assert not any("INSERT INTO characters_sheet" in c for c in calls)
     mock_conn.commit.assert_called_once()
+
+
+# --- migrate_image_prompts_table ---
+
+
+@pytest.mark.unit
+def test_migrate_image_prompts_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_image_prompts_table
+
+    migrate_image_prompts_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS image_prompts" in c for c in calls)
+    assert any("REFERENCES scenarios" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_image_prompts_table_includes_all_fields(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import IMAGE_PROMPT_FIELDS, migrate_image_prompts_table
+
+    migrate_image_prompts_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS image_prompts" in str(c)
+    )
+    for field in IMAGE_PROMPT_FIELDS:
+        assert field in create_call
+
+
+# --- insert_image_prompt ---
+
+
+@pytest.mark.unit
+def test_insert_image_prompt_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import IMAGE_PROMPT_FIELDS, insert_image_prompt
+
+    prompt = {f: f"val_{f}" for f in IMAGE_PROMPT_FIELDS}
+    insert_image_prompt(prompt, 3)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO image_prompts" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_image_prompt_last_param_is_scenario_id(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import IMAGE_PROMPT_FIELDS, insert_image_prompt
+
+    prompt = {f: f"val_{f}" for f in IMAGE_PROMPT_FIELDS}
+    insert_image_prompt(prompt, 3)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO image_prompts" in str(c)
+    )
+    assert insert_call.args[1][-1] == 3

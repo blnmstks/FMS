@@ -14,12 +14,14 @@ from app.db import (
     fetch_rows,
     insert_characters,
     insert_idea,
+    insert_image_prompt,
     insert_scenario,
     update_idea_status,
     upsert_visual_styles,
 )
 from app.services.branding import analyze_channel
 from app.services.ideas import generate_video_ideas
+from app.services.image_prompts import generate_image_prompt
 from app.services.scenarios import generate_scenario
 from app.services.transcripts import analyze_transcripts
 from app.services.visual_styles import generate_visual_style
@@ -224,7 +226,7 @@ def s4_pick(state: ProjectState) -> dict:
 
 # --- Диспетчер шагов 5+: соответствие статус→шаг и выбор целевого шага ---
 
-# Источник истины для соответствия — порядок IDEAS_STATUSES: raw_idea→5 … video_done→12.
+# Источник истины для соответствия — порядок IDEAS_STATUSES: raw_idea→5 … video_done→13.
 STEP_BY_STATUS = {status: 5 + i for i, status in enumerate(IDEAS_STATUSES)}
 FIRST_STEP = 5
 
@@ -322,8 +324,48 @@ def s6_visual_style(state: ProjectState) -> dict:
     return _advance(state, 6, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s7_image_prompt(state: ProjectState) -> dict:
+    # Шаг 7: по идее со статусом clips_visual_style_finished генерирует через ИИ image-prompt
+    # ПЕРВОГО бита сценария и сохраняет его в image_prompts (привязка к сценарию), переводит
+    # идею в image_prompt_finished. Узел самодостаточен (не доверяет state).
+    # Статус меняется ТОЛЬКО после успешной записи в БД: при ошибке insert_image_prompt
+    # исключение пробрасывается, флоу останавливается, статус и курсор не двигаются.
+    idea = fetch_idea_by_status("clips_visual_style_finished")
+    if not idea.get("exists"):
+        return _advance(state, 7)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    answer = interrupt("STATE 7 — Already have first beat img? (y/n)")
+    if answer.strip().lower() in ("y", "yes"):
+        # Картинка первого бита уже есть — пропускаем шаг 8 (генерацию), уводим на шаг 9:
+        # выставляем статус, который потребляет шаг 9 (диспетчер сам направит на s9).
+        update_idea_status(idea_id, "image_generated")
+        return _advance(state, 7, {"idea_id": idea_id, "idea_name": idea_name})
+
+    print(f"\nSTATE 7 — generating first-beat image prompt for idea: {idea_name}")
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_text = scenario_row.get("scenario", "")
+    scenario_id = scenario_row.get("id")
+
+    visual_row = (fetch_rows("visual_styles", "idea", idea_id) or [{}])[0]
+    visual_style = {f: visual_row.get(f) for f in VISUAL_STYLE_FIELDS}
+
+    characters = fetch_rows("characters_sheet", "scenario", scenario_id) if scenario_id else []
+
+    prompt = generate_image_prompt(scenario_text, visual_style, characters)
+
+    if scenario_id is not None:
+        insert_image_prompt(prompt, scenario_id)
+        update_idea_status(idea_id, "image_prompt_finished")
+        print(f"STATE 7 — image prompt saved and idea marked image_prompt_finished: {idea_name}")
+    return _advance(state, 7, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 7..12: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 8..12: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -365,7 +407,8 @@ g.add_node("s4_pick", s4_pick)
 g.add_node("dispatch", dispatch)
 g.add_node("s5", s5_scenario)
 g.add_node("s6", s6_visual_style)
-for _n in range(7, 13):  # шаги 7..12 — заглушки из фабрики
+g.add_node("s7", s7_image_prompt)
+for _n in range(8, 14):  # шаги 8..13 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")
@@ -375,12 +418,12 @@ g.add_edge("s3", "dispatch")
 g.add_conditional_edges("s4", _route_s4, {"s4_pick": "s4_pick", "dispatch": "dispatch"})
 g.add_edge("s4_pick", "dispatch")
 
-# Диспетчер ведёт на любой из шагов 4..12 или завершает граф.
-_dispatch_targets = {f"s{n}": f"s{n}" for n in range(4, 13)}
+# Диспетчер ведёт на любой из шагов 4..13 или завершает граф.
+_dispatch_targets = {f"s{n}": f"s{n}" for n in range(4, 14)}
 _dispatch_targets[END] = END
 g.add_conditional_edges("dispatch", _route_dispatch, _dispatch_targets)
 
-for _n in range(5, 13):  # после каждого шага конвейера — назад в диспетчер
+for _n in range(5, 14):  # после каждого шага конвейера — назад в диспетчер
     g.add_edge(f"s{_n}", "dispatch")
 
 
