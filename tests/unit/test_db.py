@@ -272,6 +272,73 @@ def test_fetch_raw_idea_returns_false_when_no_row(mock_psycopg_connect):
     assert result == {"raw_idea_exists": False}
 
 
+# --- fetch_idea_by_status ---
+
+
+@pytest.mark.unit
+def test_fetch_idea_by_status_returns_idea_when_exists(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = (7, "X")
+
+    from app.db import fetch_idea_by_status
+
+    result = fetch_idea_by_status("scenario_finished")
+
+    assert result == {"idea_id": 7, "idea_name": "X", "exists": True}
+
+
+@pytest.mark.unit
+def test_fetch_idea_by_status_returns_false_when_no_row(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = None
+
+    from app.db import fetch_idea_by_status
+
+    result = fetch_idea_by_status("scenario_finished")
+
+    assert result == {"exists": False}
+
+
+@pytest.mark.unit
+def test_fetch_idea_by_status_passes_status_as_param(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = (1, "Y")
+
+    from app.db import fetch_idea_by_status
+
+    fetch_idea_by_status("audio_generated")
+
+    select_call = next(
+        c for c in mock_cursor.execute.call_args_list if "SELECT id, name FROM ideas" in str(c)
+    )
+    assert select_call.args[1] == ("audio_generated",)
+
+
+# --- fetch_present_idea_statuses ---
+
+
+@pytest.mark.unit
+def test_fetch_present_idea_statuses_returns_distinct_list(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchall.return_value = [("raw_idea",), ("scenario_finished",)]
+
+    from app.db import fetch_present_idea_statuses
+
+    result = fetch_present_idea_statuses()
+
+    assert result == ["raw_idea", "scenario_finished"]
+
+
+@pytest.mark.unit
+def test_fetch_present_idea_statuses_empty_when_no_rows(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchall.return_value = []
+
+    from app.db import fetch_present_idea_statuses
+
+    assert fetch_present_idea_statuses() == []
+
+
 # --- insert_idea ---
 
 
@@ -300,3 +367,78 @@ def test_insert_idea_passes_name_and_status_as_params(mock_psycopg_connect):
         c for c in mock_cursor.execute.call_args_list if "INSERT INTO ideas" in str(c)
     )
     assert insert_call.args[1] == ("Some Idea", "raw_idea")
+
+
+# --- update_idea_status ---
+
+
+@pytest.mark.unit
+def test_update_idea_status_executes_update_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import update_idea_status
+
+    update_idea_status(7, "scenario_finished")
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("UPDATE ideas" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_update_idea_status_passes_status_and_id_as_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import update_idea_status
+
+    update_idea_status(7, "scenario_finished")
+
+    update_call = next(c for c in mock_cursor.execute.call_args_list if "UPDATE ideas" in str(c))
+    assert update_call.args[1] == ("scenario_finished", 7)
+
+
+# --- migrate_scenarios_table ---
+
+
+@pytest.mark.unit
+def test_migrate_scenarios_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_scenarios_table
+
+    migrate_scenarios_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS scenarios" in c for c in calls)
+    assert any("REFERENCES ideas" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+# --- insert_scenario ---
+
+
+@pytest.mark.unit
+def test_insert_scenario_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_scenario
+
+    insert_scenario("Some scenario text", 7)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO scenarios" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_scenario_passes_scenario_and_idea_as_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_scenario
+
+    insert_scenario("Some scenario text", 7)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO scenarios" in str(c)
+    )
+    assert insert_call.args[1] == ("Some scenario text", 7)

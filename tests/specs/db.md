@@ -137,10 +137,27 @@ SQL, который выполняется:
 
 ---
 
+## `fetch_idea_by_status(status: str) -> dict`
+
+### Contract
+Читает первую идею с заданным `status` из `ideas`: `SELECT id, name FROM ideas WHERE
+status = %s LIMIT 1`.
+
+| Condition | Returns |
+|-----------|---------|
+| Есть строка | `{"idea_id": <id>, "idea_name": <name>, "exists": True}` |
+| Строки нет | `{"exists": False}` |
+
+### Test cases
+- **строка есть**: cursor возвращает `(7, "X")` → `{"idea_id": 7, "idea_name": "X", "exists": True}`
+- **строки нет**: cursor возвращает `None` → `{"exists": False}`
+
+---
+
 ## `fetch_raw_idea() -> dict`
 
 ### Contract
-Читает первую идею со статусом `raw_idea` из таблицы `ideas`. Аргументов нет.
+Тонкая обёртка над `fetch_idea_by_status("raw_idea")` (для совместимости с шагом 5).
 
 | Condition | Returns |
 |-----------|---------|
@@ -157,6 +174,19 @@ SQL, который выполняется:
 
 ---
 
+## `fetch_present_idea_statuses() -> list[str]`
+
+### Contract
+Возвращает список уникальных статусов идей в таблице: `SELECT DISTINCT status FROM ideas`.
+Используется диспетчером графа для выбора шага. Пустая таблица → `[]`.
+
+### Test cases
+- **есть строки**: cursor `fetchall` → `[("raw_idea",), ("scenario_finished",)]` →
+  `["raw_idea", "scenario_finished"]`
+- **пусто**: `fetchall` → `[]` → `[]`
+
+---
+
 ## `insert_idea(name: str, status: str) -> None`
 
 ### Contract
@@ -168,4 +198,65 @@ SQL, который выполняется:
 
 ### Test cases
 - **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO ideas`, параметры `(name, status)`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `update_idea_status(idea_id: int, status: str) -> None`
+
+### Contract
+Обновляет статус идеи: `UPDATE ideas SET status=%s WHERE id=%s`, параметры `(status, idea_id)`.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Параметры передаются в порядке `(status, idea_id)`.
+
+### Test cases
+- **update вызван**: `cur.execute` вызывается с SQL содержащим `UPDATE ideas`, параметры `(status, idea_id)`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `migrate_scenarios_table() -> None`
+
+### Contract
+Создаёт таблицу `scenarios`, если её ещё нет. Безопасно запускать многократно
+(`CREATE TABLE IF NOT EXISTS`). FK `idea` ссылается на `ideas(id)` — миграцию `ideas`
+нужно выполнять раньше.
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS scenarios (
+    id SERIAL PRIMARY KEY,
+    scenario TEXT,
+    idea INTEGER REFERENCES ideas(id)
+)
+```
+
+Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Колонка `idea` — внешний ключ на `ideas(id)`.
+3. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: `cur.execute` вызывается с SQL содержащим `CREATE TABLE IF NOT EXISTS scenarios`
+- **FK на ideas**: SQL содержит `REFERENCES ideas`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `insert_scenario(scenario: str, idea_id: int) -> None`
+
+### Contract
+Вставляет сгенерированный сценарий, связывая его с идеей:
+`INSERT INTO scenarios (scenario, idea) VALUES (%s, %s)`, параметры `(scenario, idea_id)`.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Всегда `INSERT` — каждый сценарий новая строка.
+
+### Test cases
+- **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO scenarios`, параметры `(scenario, idea_id)`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз

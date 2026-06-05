@@ -21,3 +21,7 @@ class ProjectState(TypedDict, total=False):
     idea_name: str
     idea_id: int
     raw_idea_exists: bool
+    # step 5+: маршрутизация по статусам идей (диспетчер)
+    pipeline_step: int  # курсор текущего шага (старт 5)
+    executed_steps: list[int]  # шаги, выполненные за этот прогон (защита от зацикливания)
+    pipeline_target: int  # шаг, выбранный диспетчером (для роутера)

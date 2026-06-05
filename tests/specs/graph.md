@@ -1,41 +1,92 @@
-# Spec: `app/graph` — Step 5 (scenario entry)
+# Spec: `app/graph` — диспетчер шагов 5+ по статусам идей
 
-## `s5_scenario(state) -> dict`
+Начиная с шага 5, маршрут определяется статусами идей в таблице `ideas`. Соответствие
+статус → шаг линейное (из `IDEAS_STATUSES`): `raw_idea→5`, `scenario_finished→6`,
+`clips_visual_style_finished→7`, `image_prompt_finished→8`, `av_prompts_finished→9`,
+`audio_generated→10`, `clips_generated→11`, `video_done→12`.
 
-### Contract
-Шаг 5 — точка входа в работу над сценарием. Берёт идею со статусом `raw_idea`
-напрямую из БД (источник истины), а не из переданного state.
+## `STEP_BY_STATUS`
+Словарь `{status: 5 + index}` из `IDEAS_STATUSES` (единственный источник истины — порядок
+статусов). `FIRST_STEP = 5`.
 
-Вызывает `fetch_raw_idea()`:
-- **нет `raw_idea`** (`raw_idea_exists` == False) → печатает в консоль
-  `there is no idea for scenario` и возвращает `{"raw_idea_exists": False}`
-  (роутер `_route_s5` уведёт обратно на шаг 4).
-- **`raw_idea` найдена** → печатает `STATE 5 — working with raw idea: <name>`
-  и возвращает `{"idea_id", "idea_name", "raw_idea_exists": True}`.
-
-Генерация самого сценария — будущая часть шага 5 (ветка «идея найдена» пока заглушка).
-
-## `_route_s5(state) -> str`
+## `select_target_step(present_statuses: set[str], current_step: int) -> int`
 
 ### Contract
-Маршрутизатор после шага 5:
-- нет `raw_idea` (`raw_idea_exists` falsy или отсутствует) → `"s4"` (назад к выбору идеи);
-- `raw_idea_exists` == True → `END` (завершение графа).
-
-Шаг 4 на любой ветке создаёт `raw_idea`, поэтому цикл `s5 → s4 → (s4_pick →) s5`
-завершается за один проход.
-
-### Invariants
-1. `s5_scenario` читает идею из БД, не полагаясь на `idea_name`/`idea_id` из state.
-2. Отсутствие `raw_idea` → ровно строка `there is no idea for scenario` в консоль
-   и возврат на шаг 4.
-3. При наличии идеи возвращаемые `idea_id`/`idea_name` соответствуют записи из БД.
+Чистая функция выбора целевого шага. `steps` = множество шагов присутствующих статусов.
+- нет идей (`steps` пусто) → `4` (создать `raw_idea`);
+- `current_step` среди `steps` → `current_step` (свой статус);
+- иначе есть предшествующие (`< current_step`) → `min(earlier)` (самый ранний предыдущий);
+- иначе → `min(later)` (ближайший последующий).
 
 ### Test cases
-- **нет идеи → возврат на s4**: `_route_s5({"raw_idea_exists": False})` == `"s4"`
-- **флаг отсутствует → возврат на s4**: `_route_s5({})` == `"s4"`
-- **есть идея → END**: `_route_s5({"raw_idea_exists": True})` == `END`
-- **узел без идеи**: `fetch_raw_idea` → `{"raw_idea_exists": False}` ⇒ возврат
-  `{"raw_idea_exists": False}`, в stdout `there is no idea for scenario`
-- **узел с идеей**: `fetch_raw_idea` → `{"idea_id": 7, "idea_name": "X", "raw_idea_exists": True}`
-  ⇒ возврат содержит `idea_id == 7`, `idea_name == "X"`, `raw_idea_exists == True`
+- свой: `({"raw_idea"}, 5) == 5`; `({"scenario_finished"}, 6) == 6`
+- свой приоритетнее: `({"raw_idea", "audio_generated"}, 5) == 5`
+- самый ранний предыдущий: `({"scenario_finished", "clips_visual_style_finished"}, 9) == 6`
+- предыдущий, когда своего нет: `({"raw_idea"}, 8) == 5`
+- только последующие: `({"audio_generated"}, 5) == 10`
+- нет идей: `(set(), 5) == 4`
+
+## `dispatch(state) -> dict`
+
+### Contract
+Узел-диспетчер: читает статусы из БД (`fetch_present_idea_statuses()`), берёт курсор
+`current = state.get("pipeline_step", FIRST_STEP)` и возвращает
+`{"pipeline_target": select_target_step(set(present), current)}`.
+
+### Test cases
+- `fetch_present_idea_statuses → ["raw_idea"]`, `state={}` → `pipeline_target == 5`
+- `fetch_present_idea_statuses → ["scenario_finished"]`, `state={"pipeline_step": 6}` → `6`
+- `fetch_present_idea_statuses → []` → `pipeline_target == 4`
+
+## `_route_dispatch(state) -> str`
+
+### Contract
+Роутер после диспетчера с защитой от зацикливания:
+- `target == 4` → `"s4"`;
+- `target` уже в `executed_steps` → `END` (шаг выполнялся за этот прогон; стаб не двигает
+  статус — иначе бесконечный цикл);
+- иначе → `f"s{target}"`.
+
+### Test cases
+- `{"pipeline_target": 5}` → `"s5"`
+- `{"pipeline_target": 4}` → `"s4"`
+- `{"pipeline_target": 6, "executed_steps": [6]}` → `END`
+- `{"pipeline_target": 7, "executed_steps": [5, 6]}` → `"s7"`
+
+## `_advance(state, step, updates=None) -> dict`
+Хелпер: помечает `step` выполненным и двигает курсор. Возвращает
+`{"pipeline_step": step + 1, "executed_steps": [...прежние, step], **updates}`.
+
+## `s5_scenario(state) -> dict`
+Берёт `raw_idea` (диспетчер гарантирует её наличие), генерирует и сохраняет сценарий,
+переводит идею в `scenario_finished` (см. ниже), возвращает `_advance(state, 5, {...})`.
+Если идеи внезапно нет — защитный `_advance(state, 5)` без работы (диспетчер разрулит).
+
+Ветка «идея найдена»: `fetch_channel_info` + `fetch_channel_style_info` + транскрипты →
+`generate_scenario(...)` → `insert_scenario(scenario, idea_id)` →
+`update_idea_status(idea_id, "scenario_finished")`.
+
+### Test cases
+- идея есть: вызваны `insert_scenario("SCENARIO", 7)` и
+  `update_idea_status(7, "scenario_finished")`; результат содержит `pipeline_step == 6` и
+  `5 in executed_steps`
+- идеи нет: результат содержит `pipeline_step == 6`, `5 in executed_steps`; LLM не вызван
+
+## Стабы шагов 6–12 — фабрика `_make_stub(n)`
+Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
+`fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
+
+### Test cases
+- `_make_stub(7)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 8`,
+  `7 in executed_steps`; в stdout `STATE 7`
+
+## Поток графа
+```
+START → s1 → (s2) → s3 → dispatch
+dispatch → _route_dispatch → s4 | s5..s12 | END
+s4 → _route_s4 → s4_pick | dispatch
+s4_pick → dispatch
+s5..s12 → dispatch
+```
+`_route_s4`: `generated_ideas` есть → `"s4_pick"`, иначе → `"dispatch"`.
+`_route_s5` удалён (его роль перешла диспетчеру).

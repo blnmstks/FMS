@@ -2,7 +2,7 @@ import json
 import random
 
 from app.config import DEFAULT_MODEL
-from app.infrastructure.llm_client import get_client
+from app.infrastructure.llm_client import get_client, log_llm_input
 from app.prompts.branding import DEFINE_BRAND_ID_PROMPT
 from app.utils.images import encode_images
 
@@ -14,15 +14,17 @@ def analyze_channel(channel_name: str, screenshot_paths: list[str]) -> dict:
         {"type": "text", "text": f"Channel name: {channel_name}\n\n{DEFINE_BRAND_ID_PROMPT}"}
     ] + images
 
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a JSON API. Respond only with valid JSON, no markdown, no commentary.",
+        },
+        {"role": "user", "content": content},
+    ]
+    log_llm_input(messages)
     response = client.chat.completions.create(
         model=DEFAULT_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a JSON API. Respond only with valid JSON, no markdown, no commentary.",
-            },
-            {"role": "user", "content": content},
-        ],
+        messages=messages,
         response_format={"type": "json_object"},
     )
 

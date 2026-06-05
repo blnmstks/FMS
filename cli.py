@@ -6,6 +6,7 @@ from app.db import (
     fetch_channel_info,
     migrate_channel_info_style,
     migrate_ideas_table,
+    migrate_scenarios_table,
     upsert_channel_info,
     upsert_channel_style_info,
 )
@@ -17,6 +18,7 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
     checkpointer.setup()
     migrate_channel_info_style()
     migrate_ideas_table()
+    migrate_scenarios_table()
     app = build_app(checkpointer)
 
     initial_state = fetch_channel_info()

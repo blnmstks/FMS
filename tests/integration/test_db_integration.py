@@ -134,3 +134,85 @@ def test_migrate_ideas_table_idempotent(pg_container, monkeypatch):
     # Повторный запуск миграции не должен падать (тип и таблица уже существуют).
     db.migrate_ideas_table()
     db.migrate_ideas_table()
+
+
+@pytest.mark.integration
+def test_insert_scenario_links_to_idea_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+
+    db.insert_idea("Idea for scenario", "raw_idea")
+    idea = db.fetch_raw_idea()
+    idea_id = idea["idea_id"]
+
+    db.insert_scenario("A dramatic scenario.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        row = conn.execute(
+            "SELECT scenario, idea FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()
+    assert row == ("A dramatic scenario.", idea_id)
+
+
+@pytest.mark.integration
+def test_update_idea_status_advances_and_clears_raw_idea(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+
+    db.insert_idea("Idea to advance", "raw_idea")
+    with psycopg.connect(pg_container) as conn:
+        idea_id = conn.execute(
+            "SELECT id FROM ideas WHERE name = %s", ("Idea to advance",)
+        ).fetchone()[0]
+
+    db.update_idea_status(idea_id, "scenario_finished")
+
+    with psycopg.connect(pg_container) as conn:
+        status = conn.execute("SELECT status FROM ideas WHERE id = %s", (idea_id,)).fetchone()[0]
+    assert status == "scenario_finished"
+
+
+@pytest.mark.integration
+def test_dispatch_helpers_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.insert_idea("Idea A", "scenario_finished")
+    db.insert_idea("Idea B", "audio_generated")
+
+    # fetch_present_idea_statuses возвращает уникальные статусы из таблицы.
+    assert set(db.fetch_present_idea_statuses()) >= {"scenario_finished", "audio_generated"}
+
+    # fetch_idea_by_status находит идею по конкретному статусу.
+    found = db.fetch_idea_by_status("audio_generated")
+    assert found["exists"] is True
+    assert found["idea_name"] == "Idea B"
+
+    assert db.fetch_idea_by_status("video_done") == {"exists": False}

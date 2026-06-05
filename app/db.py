@@ -61,16 +61,38 @@ def migrate_ideas_table() -> None:
         conn.commit()
 
 
-def fetch_raw_idea() -> dict:
-    # Читает первую идею со статусом raw_idea из таблицы ideas.
-    # Возвращает {idea_id, idea_name, raw_idea_exists: True} если найдена, иначе {raw_idea_exists: False}.
+def fetch_idea_by_status(status: str) -> dict:
+    # Читает первую идею с заданным статусом из таблицы ideas.
+    # Возвращает {idea_id, idea_name, exists: True} если найдена, иначе {exists: False}.
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name FROM ideas WHERE status = 'raw_idea' LIMIT 1")
+            cur.execute("SELECT id, name FROM ideas WHERE status = %s LIMIT 1", (status,))
             row = cur.fetchone()
     if row:
-        return {"idea_id": row[0], "idea_name": row[1], "raw_idea_exists": True}
+        return {"idea_id": row[0], "idea_name": row[1], "exists": True}
+    return {"exists": False}
+
+
+def fetch_raw_idea() -> dict:
+    # Тонкая обёртка над fetch_idea_by_status("raw_idea") для шага 5.
+    # Возвращает {idea_id, idea_name, raw_idea_exists: True} если найдена, иначе {raw_idea_exists: False}.
+    idea = fetch_idea_by_status("raw_idea")
+    if idea["exists"]:
+        return {
+            "idea_id": idea["idea_id"],
+            "idea_name": idea["idea_name"],
+            "raw_idea_exists": True,
+        }
     return {"raw_idea_exists": False}
+
+
+def fetch_present_idea_statuses() -> list[str]:
+    # Возвращает список уникальных статусов идей в таблице (для диспетчера графа).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT status FROM ideas")
+            rows = cur.fetchall()
+    return [row[0] for row in rows]
 
 
 def insert_idea(name: str, status: str) -> None:
@@ -80,6 +102,43 @@ def insert_idea(name: str, status: str) -> None:
             cur.execute(
                 "INSERT INTO ideas (name, status) VALUES (%s, %s)",
                 (name, status),
+            )
+        conn.commit()
+
+
+def update_idea_status(idea_id: int, status: str) -> None:
+    # Обновляет статус идеи (например, raw_idea -> scenario_finished).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ideas SET status = %s WHERE id = %s",
+                (status, idea_id),
+            )
+        conn.commit()
+
+
+def migrate_scenarios_table() -> None:
+    # Создаёт таблицу scenarios, если её ещё нет. Колонка idea — внешний ключ на ideas(id).
+    # Безопасно запускать многократно; миграцию ideas нужно выполнять раньше.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS scenarios (
+                    id SERIAL PRIMARY KEY,
+                    scenario TEXT,
+                    idea INTEGER REFERENCES ideas(id)
+                )
+            """)
+        conn.commit()
+
+
+def insert_scenario(scenario: str, idea_id: int) -> None:
+    # Вставляет сгенерированный сценарий, связывая его с идеей.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO scenarios (scenario, idea) VALUES (%s, %s)",
+                (scenario, idea_id),
             )
         conn.commit()
 
