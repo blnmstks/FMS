@@ -190,6 +190,39 @@ def test_upsert_style_calls_insert_when_no_row(mock_psycopg_connect):
     mock_conn.commit.assert_called_once()
 
 
+# --- migrate_channel_info_table ---
+
+
+@pytest.mark.unit
+def test_migrate_channel_info_table_creates_table(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_channel_info_table
+
+    migrate_channel_info_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS channel_info" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_channel_info_table_includes_base_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_channel_info_table
+
+    migrate_channel_info_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS channel_info" in str(c)
+    )
+    for col in ("name", "description", "avatar", "banner"):
+        assert col in create_call
+
+
 # --- migrate_ideas_table ---
 
 
@@ -442,3 +475,197 @@ def test_insert_scenario_passes_scenario_and_idea_as_params(mock_psycopg_connect
         c for c in mock_cursor.execute.call_args_list if "INSERT INTO scenarios" in str(c)
     )
     assert insert_call.args[1] == ("Some scenario text", 7)
+
+
+# --- migrate_visual_styles_table ---
+
+
+@pytest.mark.unit
+def test_migrate_visual_styles_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_visual_styles_table
+
+    migrate_visual_styles_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS visual_styles" in c for c in calls)
+    assert any("REFERENCES channel_info" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_visual_styles_table_includes_all_style_fields(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import VISUAL_STYLE_FIELDS, migrate_visual_styles_table
+
+    migrate_visual_styles_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS visual_styles" in str(c)
+    )
+    for field in VISUAL_STYLE_FIELDS:
+        assert field in create_call
+
+
+# --- upsert_visual_styles ---
+
+
+@pytest.mark.unit
+def test_upsert_visual_styles_calls_update_when_row_exists(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = (1,)
+
+    from app.db import VISUAL_STYLE_FIELDS, upsert_visual_styles
+
+    style = {f: f"val_{f}" for f in VISUAL_STYLE_FIELDS}
+    upsert_visual_styles(style, 5)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("UPDATE visual_styles" in c for c in calls)
+    assert not any("INSERT INTO visual_styles" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_upsert_visual_styles_calls_insert_when_no_row(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = None
+
+    from app.db import VISUAL_STYLE_FIELDS, upsert_visual_styles
+
+    style = {f: f"val_{f}" for f in VISUAL_STYLE_FIELDS}
+    upsert_visual_styles(style, 5)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO visual_styles" in c for c in calls)
+    assert not any("UPDATE visual_styles" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_upsert_visual_styles_lookup_by_channel(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = None
+
+    from app.db import VISUAL_STYLE_FIELDS, upsert_visual_styles
+
+    style = {f: f"val_{f}" for f in VISUAL_STYLE_FIELDS}
+    upsert_visual_styles(style, 5)
+
+    select_call = next(
+        c for c in mock_cursor.execute.call_args_list if "SELECT id FROM visual_styles" in str(c)
+    )
+    assert "WHERE channel_info" in str(select_call)
+    assert select_call.args[1] == (5,)
+
+
+# --- fetch_rows ---
+
+
+@pytest.mark.unit
+def test_fetch_rows_maps_columns_to_dicts(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.description = [("id",), ("channel_info",)]
+    mock_cursor.fetchall.return_value = [(1, "5")]
+
+    from app.db import fetch_rows
+
+    result = fetch_rows("visual_styles", "channel_info", 5)
+
+    assert result == [{"id": 1, "channel_info": "5"}]
+
+
+@pytest.mark.unit
+def test_fetch_rows_returns_empty_list_when_no_rows(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.description = [("id",), ("channel_info",)]
+    mock_cursor.fetchall.return_value = []
+
+    from app.db import fetch_rows
+
+    assert fetch_rows("visual_styles", "channel_info", 5) == []
+
+
+@pytest.mark.unit
+def test_fetch_rows_passes_value_as_param(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.description = [("id",)]
+    mock_cursor.fetchall.return_value = []
+
+    from app.db import fetch_rows
+
+    fetch_rows("scenarios", "idea", 7)
+
+    select_call = next(
+        c for c in mock_cursor.execute.call_args_list if "SELECT * FROM scenarios" in str(c)
+    )
+    assert select_call.args[1] == (7,)
+
+
+# --- fetch_row_by_id ---
+
+
+@pytest.mark.unit
+def test_fetch_row_by_id_returns_dict_when_exists(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.description = [("id",), ("name",)]
+    mock_cursor.fetchone.return_value = (7, "X")
+
+    from app.db import fetch_row_by_id
+
+    result = fetch_row_by_id("ideas", 7)
+
+    assert result == {"id": 7, "name": "X"}
+
+
+@pytest.mark.unit
+def test_fetch_row_by_id_returns_none_when_no_row(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = None
+
+    from app.db import fetch_row_by_id
+
+    assert fetch_row_by_id("ideas", 7) is None
+
+
+# --- fetch_related ---
+
+
+@pytest.mark.unit
+def test_fetch_related_collects_children_for_parent_source(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    # channel_info — источник-родитель: у него нет FK-рёбер вверх, только дети (visual_styles).
+    # fetch_row_by_id(channel_info) -> строка канала; fetch_rows(visual_styles) -> список.
+    mock_cursor.description = [("id",)]
+    mock_cursor.fetchone.return_value = (1,)
+    mock_cursor.fetchall.return_value = [(10, "1"), (11, "1")]
+
+    from app.db import fetch_related
+
+    result = fetch_related("channel_info", 1)
+
+    assert result["source"] == {"id": 1}
+    assert isinstance(result["children"]["visual_styles"], list)
+    assert len(result["children"]["visual_styles"]) == 2
+    assert result["parents"] == {}
+
+
+@pytest.mark.unit
+def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    # scenarios — источник-потомок: ребро (scenarios, idea, ideas).
+    # Первый fetch_row_by_id -> строка сценария с idea=7; второй -> строка идеи.
+    mock_cursor.description = [("id",), ("scenario",), ("idea",)]
+    mock_cursor.fetchone.side_effect = [(5, "text", 7), (7, "name", "raw_idea")]
+
+    from app.db import fetch_related
+
+    result = fetch_related("scenarios", 5)
+
+    assert result["source"]["idea"] == 7
+    assert result["parents"]["ideas"]["id"] == 7
+    assert result["children"] == {}

@@ -34,6 +34,26 @@ STYLE_FIELDS = [
     "target_word_count",
 ]
 
+# Единственный источник истины для колонок визуального стиля (таблица visual_styles).
+VISUAL_STYLE_FIELDS = [
+    "art_style",
+    "color_pallet",
+    "lighting_style",
+    "camera_style",
+    "composition",
+    "detail_level",
+    "mood",
+]
+
+# Реестр FK-рёбер графа данных: (таблица-потомок, колонка-FK, таблица-родитель),
+# смысл — child.<fk_column> -> parent.id. Единственный источник истины для fetch_related.
+# ВАЖНО: имена таблиц/колонок берутся ТОЛЬКО отсюда (доверенный whitelist), никогда из
+# пользовательского ввода — поэтому их безопасно подставлять в SQL f-строкой.
+RELATION_EDGES = [
+    ("visual_styles", "channel_info", "channel_info"),
+    ("scenarios", "idea", "ideas"),
+]
+
 
 def migrate_ideas_table() -> None:
     # Создаёт ENUM-тип idea_status и таблицу ideas, если их ещё нет, и идемпотентно
@@ -161,6 +181,25 @@ def fetch_channel_info() -> dict:
     return {"channel_info_complete": False}
 
 
+def migrate_channel_info_table() -> None:
+    # Идемпотентно создаёт базовую таблицу channel_info (id, name, description, avatar, banner),
+    # чтобы проект разворачивался на чистой базе «из коробки». Запускать первой — до
+    # migrate_channel_info_style (ALTER) и migrate_visual_styles_table (FK на channel_info(id)).
+    # Стилевые колонки тут НЕ добавляются — за них отвечает migrate_channel_info_style.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS channel_info (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT,
+                    description TEXT,
+                    avatar TEXT,
+                    banner TEXT
+                )
+            """)
+        conn.commit()
+
+
 def migrate_channel_info_style() -> None:
     # Добавляет все колонки стилистики (STYLE_FIELDS) + transcript_files в таблицу channel_info, если их ещё нет.
     # Безопасно запускать многократно — IF NOT EXISTS гарантирует идемпотентность.
@@ -248,3 +287,87 @@ def upsert_channel_info(data: dict) -> None:
                     ),
                 )
         conn.commit()
+
+
+def migrate_visual_styles_table() -> None:
+    # Идемпотентно создаёт таблицу visual_styles. Колонки стиля берутся из VISUAL_STYLE_FIELDS,
+    # channel_info — внешний ключ на channel_info(id). Запускать после того, как channel_info
+    # уже существует. Безопасно запускать многократно (CREATE TABLE IF NOT EXISTS).
+    style_cols = ",\n                    ".join(f"{f} TEXT" for f in VISUAL_STYLE_FIELDS)
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS visual_styles (
+                    id SERIAL PRIMARY KEY,
+                    {style_cols},
+                    channel_info INTEGER REFERENCES channel_info(id)
+                )
+            """)
+        conn.commit()
+
+
+def upsert_visual_styles(style: dict, channel_id: int) -> None:
+    # Сохраняет визуальный стиль канала — одна строка на канал. Ключ поиска — колонка
+    # channel_info. Если строка для канала есть — UPDATE, иначе INSERT.
+    cols = VISUAL_STYLE_FIELDS + ["channel_info"]
+    values = [style[f] for f in VISUAL_STYLE_FIELDS] + [channel_id]
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM visual_styles WHERE channel_info=%s LIMIT 1", (channel_id,))
+            existing = cur.fetchone()
+            if existing:
+                set_clause = ", ".join(f"{c}=%s" for c in cols)
+                cur.execute(
+                    f"UPDATE visual_styles SET {set_clause} WHERE id=%s",
+                    values + [existing[0]],
+                )
+            else:
+                col_clause = ", ".join(cols)
+                placeholders = ", ".join(["%s"] * len(cols))
+                cur.execute(
+                    f"INSERT INTO visual_styles ({col_clause}) VALUES ({placeholders})",
+                    values,
+                )
+        conn.commit()
+
+
+def fetch_rows(table: str, column: str, value) -> list[dict]:
+    # Generic-помощник: SELECT * FROM {table} WHERE {column} = %s, строки маппятся в dict
+    # по именам колонок из cursor.description. Пустой результат → [].
+    # table/column должны приходить только из доверенного whitelist (RELATION_EDGES) —
+    # они подставляются f-строкой, value передаётся параметром.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {table} WHERE {column} = %s", (value,))
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def fetch_row_by_id(table: str, value) -> dict | None:
+    # Generic-помощник: SELECT * FROM {table} WHERE id = %s LIMIT 1. Возвращает dict
+    # (по cursor.description) или None. table — только из доверенного whitelist.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s LIMIT 1", (value,))
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+    if row is None:
+        return None
+    return dict(zip(cols, row))
+
+
+def fetch_related(source_table: str, source_id: int) -> dict:
+    # Обобщённый обход связей источника в обе стороны по RELATION_EDGES.
+    # Возвращает {"source": dict|None, "parents": {table: dict|None}, "children": {table: [dict]}}:
+    #   - "children" — строки, ссылающиеся на источник (источник как родитель);
+    #   - "parents"  — строки, на которые ссылается источник (источник как потомок).
+    source = fetch_row_by_id(source_table, source_id)
+    parents: dict = {}
+    children: dict = {}
+    for child, col, parent in RELATION_EDGES:
+        if parent == source_table:
+            children[child] = fetch_rows(child, col, source_id)
+        if child == source_table and source is not None and source.get(col) is not None:
+            parents[parent] = fetch_row_by_id(parent, source[col])
+    return {"source": source, "parents": parents, "children": children}

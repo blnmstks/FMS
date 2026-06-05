@@ -43,6 +43,38 @@ Saves channel info. If a row already exists — UPDATE; otherwise — INSERT.
 
 ---
 
+## `migrate_channel_info_table() -> None`
+
+### Contract
+Идемпотентно создаёт **базовую** таблицу `channel_info`, чтобы проект разворачивался на
+чистой базе «из коробки». Запускать первой — до `migrate_channel_info_style` (он делает
+`ALTER TABLE`) и до `migrate_visual_styles_table` (FK на `channel_info(id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS channel_info (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    description TEXT,
+    avatar TEXT,
+    banner TEXT
+)
+```
+Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`) — на существующей базе это no-op, флоу не ломается.
+2. Создаёт только базовые колонки (`id, name, description, avatar, banner`); стилевые колонки
+   добавляет отдельно `migrate_channel_info_style`.
+3. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS channel_info`
+- **базовые колонки**: SQL содержит `name`, `description`, `avatar`, `banner`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
 ## `migrate_channel_info_style() -> None`
 
 ### Contract
@@ -260,3 +292,145 @@ CREATE TABLE IF NOT EXISTS scenarios (
 ### Test cases
 - **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO scenarios`, параметры `(scenario, idea_id)`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## Константы схемы
+
+### `VISUAL_STYLE_FIELDS`
+Единственный источник истины для колонок визуального стиля:
+`art_style`, `color_pallet`, `lighting_style`, `camera_style`, `composition`,
+`detail_level`, `mood`. Используется в `migrate_visual_styles_table` (DDL) и
+`upsert_visual_styles` (значения).
+
+### `RELATION_EDGES`
+Реестр FK-рёбер графа данных: список кортежей `(child_table, fk_column, parent_table)`,
+смысл — `child.<fk_column> -> parent.id`. Единственный источник истины для `fetch_related`.
+Текущее содержимое:
+- `("visual_styles", "channel_info", "channel_info")`
+- `("scenarios", "idea", "ideas")`
+
+**Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
+пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
+
+---
+
+## `migrate_visual_styles_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `visual_styles`. Запускать после того, как существует
+`channel_info` (FK `channel_info` ссылается на `channel_info(id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS visual_styles (
+    id SERIAL PRIMARY KEY,
+    art_style TEXT, color_pallet TEXT, lighting_style TEXT,
+    camera_style TEXT, composition TEXT, detail_level TEXT, mood TEXT,
+    channel_info INTEGER REFERENCES channel_info(id)
+)
+```
+Колонки стиля генерируются из `VISUAL_STYLE_FIELDS`. Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Все колонки из `VISUAL_STYLE_FIELDS` присутствуют в DDL.
+3. Колонка `channel_info` — внешний ключ на `channel_info(id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS visual_styles`
+- **все поля**: SQL содержит каждое имя из `VISUAL_STYLE_FIELDS`
+- **FK**: SQL содержит `REFERENCES channel_info`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `upsert_visual_styles(style: dict, channel_id: int) -> None`
+
+### Contract
+Сохраняет визуальный стиль канала — **одна строка на канал**. Ключ поиска — колонка
+`channel_info`: `SELECT id FROM visual_styles WHERE channel_info=%s LIMIT 1`.
+
+| Condition | SQL executed |
+|-----------|-------------|
+| Строка найдена | `UPDATE visual_styles SET <VISUAL_STYLE_FIELDS, channel_info> WHERE id=%s` |
+| Строки нет | `INSERT INTO visual_styles (<VISUAL_STYLE_FIELDS, channel_info>) VALUES (...)` |
+
+Значения: `[style[f] for f in VISUAL_STYLE_FIELDS] + [channel_id]`. Всегда `conn.commit()`.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Не вызывает UPDATE и INSERT в одном вызове.
+3. Поиск существующей строки идёт по `channel_info`, а не по «первой строке».
+
+### Test cases
+- **существующая строка**: `fetchone()=(1,)` → UPDATE, не INSERT
+- **новая строка**: `fetchone()=None` → INSERT, не UPDATE
+- **поиск по каналу**: SELECT содержит `WHERE channel_info`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `fetch_rows(table: str, column: str, value) -> list[dict]`
+
+### Contract
+Низкоуровневый помощник: `SELECT * FROM {table} WHERE {column} = %s`. Кортежи строк
+маппятся в `dict` по именам колонок из `cursor.description`. Пустой результат → `[]`.
+
+`table`/`column` подставляются f-строкой (идентификаторы нельзя параметризовать) и должны
+приходить только из доверенного whitelist (`RELATION_EDGES`); `value` передаётся параметром.
+
+### Invariants
+1. Возвращает список `dict` (ключи — имена колонок).
+2. Пустой `fetchall()` → `[]`.
+
+### Test cases
+- **есть строки**: `description=[("id",),("channel_info",)]`, `fetchall=[(1,"5")]` →
+  `[{"id":1,"channel_info":"5"}]`
+- **пусто**: `fetchall=[]` → `[]`
+
+---
+
+## `fetch_row_by_id(table: str, value) -> dict | None`
+
+### Contract
+`SELECT * FROM {table} WHERE id = %s LIMIT 1`. Возвращает `dict` (по `cursor.description`)
+или `None`, если строки нет.
+
+### Invariants
+1. Строка есть → `dict` по именам колонок.
+2. Строки нет → `None`.
+
+### Test cases
+- **строка есть**: `description=[("id",),("name",)]`, `fetchone=(7,"X")` →
+  `{"id":7,"name":"X"}`
+- **строки нет**: `fetchone=None` → `None`
+
+---
+
+## `fetch_related(source_table: str, source_id: int) -> dict`
+
+### Contract
+Обобщённый обход связей источника **в обе стороны** по `RELATION_EDGES`. Возвращает:
+```python
+{
+  "source":   <dict | None>,                      # строка-источник (fetch_row_by_id)
+  "parents":  {parent_table: <dict | None>, ...}, # на кого ссылается источник
+  "children": {child_table: [<dict>, ...], ...},  # кто ссылается на источник
+}
+```
+Алгоритм по каждому ребру `(child, col, parent)`:
+- `parent == source_table` → `children[child] = fetch_rows(child, col, source_id)`;
+- `child == source_table` и `source[col]` не `None` →
+  `parents[parent] = fetch_row_by_id(parent, source[col])`.
+
+### Invariants
+1. `source=None` → `parents`/`children` от рёбер-потомков не заполняются (нет значения FK),
+   но «дети» источника-родителя всё равно ищутся по `source_id`.
+2. «Дети» — всегда список; «родитель» — `dict` или `None`.
+
+### Test cases
+- **источник-родитель** (`channel_info`): `children["visual_styles"]` — список строк
+- **источник-потомок** (`scenarios`): `parents["ideas"]` — `dict` строки идеи
+
