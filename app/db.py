@@ -7,6 +7,7 @@ from app.config import DB_URL
 # Единственный источник истины для названий колонок стилистики.
 # Используется в db.py (SQL), graph.py (подсказки пользователю) и services/transcripts.py (парсинг).
 IDEAS_STATUSES = [
+    "raw_idea",
     "scenario_finished",
     "clips_visual_style_finished",
     "image_prompt_finished",
@@ -35,6 +36,9 @@ STYLE_FIELDS = [
 
 
 def migrate_ideas_table() -> None:
+    # Создаёт ENUM-тип idea_status и таблицу ideas, если их ещё нет, и идемпотентно
+    # дополняет уже существующий тип всеми значениями из IDEAS_STATUSES (включая новые).
+    # Безопасно запускать многократно.
     enum_values = ", ".join(f"'{s}'" for s in IDEAS_STATUSES)
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -45,6 +49,8 @@ def migrate_ideas_table() -> None:
                     WHEN duplicate_object THEN NULL;
                 END $$
             """)
+            for status in IDEAS_STATUSES:
+                cur.execute(f"ALTER TYPE idea_status ADD VALUE IF NOT EXISTS '{status}'")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ideas (
                     id SERIAL PRIMARY KEY,
@@ -52,6 +58,29 @@ def migrate_ideas_table() -> None:
                     status idea_status
                 )
             """)
+        conn.commit()
+
+
+def fetch_raw_idea() -> dict:
+    # Читает первую идею со статусом raw_idea из таблицы ideas.
+    # Возвращает {idea_id, idea_name, raw_idea_exists: True} если найдена, иначе {raw_idea_exists: False}.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name FROM ideas WHERE status = 'raw_idea' LIMIT 1")
+            row = cur.fetchone()
+    if row:
+        return {"idea_id": row[0], "idea_name": row[1], "raw_idea_exists": True}
+    return {"raw_idea_exists": False}
+
+
+def insert_idea(name: str, status: str) -> None:
+    # Вставляет новую идею в таблицу ideas.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO ideas (name, status) VALUES (%s, %s)",
+                (name, status),
+            )
         conn.commit()
 
 

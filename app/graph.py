@@ -2,11 +2,18 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.config import VAULT_PATH
-from app.db import STYLE_FIELDS, fetch_channel_style_info
+from app.db import (
+    STYLE_FIELDS,
+    fetch_channel_info,
+    fetch_channel_style_info,
+    fetch_raw_idea,
+    insert_idea,
+)
 from app.services.branding import analyze_channel
+from app.services.ideas import generate_video_ideas
 from app.services.transcripts import analyze_transcripts
 from app.state import ProjectState
-from app.utils.files import read_text_file, save_to_vault
+from app.utils.files import read_from_vault, read_text_file, save_to_vault
 
 
 def s1_channel(state: ProjectState) -> dict:
@@ -147,9 +154,78 @@ def s3_transcripts(_: ProjectState) -> dict:
     }
 
 
+def s4_ideas(_: ProjectState) -> dict:
+    # Шаг 4 графа: работа с таблицей ideas.
+    # Если уже есть идея со статусом raw_idea — сразу к шагу 5 (роутер уведёт в s5).
+    # Иначе спрашивает: сгенерировать идеи через ИИ или ввести свою.
+    # Ветка "сгенерировать" завершает узел вызовом LLM (без последующего interrupt),
+    # поэтому при resume LLM не вызывается повторно — выбор номера живёт в отдельном узле s4_pick.
+    existing = fetch_raw_idea()
+    if existing.get("raw_idea_exists"):
+        return {
+            "idea_name": existing["idea_name"],
+            "idea_id": existing["idea_id"],
+            "raw_idea_exists": True,
+        }
+
+    choice = interrupt(
+        "STATE 4 — Do you want me to generate video ideas or do you have your own one?\n"
+        "  1. Generate video ideas\n"
+        "  2. I have my own idea\n"
+        "Choose (1/2):"
+    )
+    if choice.strip() == "2":
+        idea = interrupt("STATE 4 — Enter your video idea:")
+        name = idea.strip()
+        insert_idea(name, "raw_idea")
+        return {"idea_name": name}
+
+    info = fetch_channel_info()
+    style = fetch_channel_style_info()
+    texts = [
+        read_from_vault(f, VAULT_PATH, "transcripts") for f in style.get("transcript_files", [])
+    ]
+    ideas = generate_video_ideas(
+        info.get("channel_name", ""),
+        info.get("channel_description", ""),
+        style,
+        texts,
+    )
+    return {"generated_ideas": ideas}
+
+
+def s4_pick(state: ProjectState) -> dict:
+    # Показывает сгенерированные идеи и записывает выбранную в ideas со статусом raw_idea.
+    ideas = state["generated_ideas"]
+    lines = ["Video ideas — in the channel's style:\n"]
+    for i, idea in enumerate(ideas, 1):
+        lines.append(f"{i}. {idea}")
+    lines.append("\nPick a number.")
+    pick = interrupt("\n".join(lines))
+
+    raw = pick.strip()
+    index = int(raw) - 1 if raw.isdigit() else 0
+    index = max(0, min(index, len(ideas) - 1))
+    chosen = ideas[index]
+    insert_idea(chosen, "raw_idea")
+    return {"idea_name": chosen}
+
+
+def s5_stub(state: ProjectState) -> dict:
+    # Шаг 5 (заглушка): дальнейшая работа с выбранной raw-идеей.
+    print(f"\nSTATE 5 — (заглушка) working with raw idea: {state.get('idea_name')}")
+    return {}
+
+
 def _route_s1(state: ProjectState) -> str:
     # Маршрутизатор после шага 1: направляет в s2 если выбраны скриншоты, иначе сразу в s3.
     return "s2" if state.get("use_screenshots") else "s3"
+
+
+def _route_s4(state: ProjectState) -> str:
+    # Маршрутизатор после шага 4: если идеи сгенерированы — к выбору номера (s4_pick),
+    # иначе (своя идея или уже существующая raw_idea) — сразу к шагу 5.
+    return "s4_pick" if state.get("generated_ideas") else "s5"
 
 
 g = StateGraph(ProjectState)
@@ -157,11 +233,17 @@ g = StateGraph(ProjectState)
 g.add_node("s1", s1_channel)
 g.add_node("s2", s2_branding)
 g.add_node("s3", s3_transcripts)
+g.add_node("s4", s4_ideas)
+g.add_node("s4_pick", s4_pick)
+g.add_node("s5", s5_stub)
 
 g.add_edge(START, "s1")
 g.add_conditional_edges("s1", _route_s1, {"s2": "s2", "s3": "s3"})
 g.add_edge("s2", "s3")
-g.add_edge("s3", END)
+g.add_edge("s3", "s4")
+g.add_conditional_edges("s4", _route_s4, {"s4_pick": "s4_pick", "s5": "s5"})
+g.add_edge("s4_pick", "s5")
+g.add_edge("s5", END)
 
 
 def build_app(checkpointer):

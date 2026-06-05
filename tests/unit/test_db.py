@@ -222,3 +222,81 @@ def test_migrate_ideas_table_enum_contains_all_statuses(mock_psycopg_connect):
     )
     for status in IDEAS_STATUSES:
         assert status in create_type_call
+
+
+@pytest.mark.unit
+def test_migrate_ideas_table_alters_type_for_each_status(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_ideas_table
+
+    migrate_ideas_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("ALTER TYPE idea_status ADD VALUE IF NOT EXISTS" in c for c in calls)
+    for status in IDEAS_STATUSES:
+        assert any(
+            "ALTER TYPE idea_status ADD VALUE IF NOT EXISTS" in c and status in c for c in calls
+        )
+
+
+@pytest.mark.unit
+def test_migrate_ideas_table_includes_raw_idea_status():
+    assert "raw_idea" in IDEAS_STATUSES
+
+
+# --- fetch_raw_idea ---
+
+
+@pytest.mark.unit
+def test_fetch_raw_idea_returns_idea_when_exists(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = (7, "My Idea")
+
+    from app.db import fetch_raw_idea
+
+    result = fetch_raw_idea()
+
+    assert result == {"idea_id": 7, "idea_name": "My Idea", "raw_idea_exists": True}
+
+
+@pytest.mark.unit
+def test_fetch_raw_idea_returns_false_when_no_row(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.return_value = None
+
+    from app.db import fetch_raw_idea
+
+    result = fetch_raw_idea()
+
+    assert result == {"raw_idea_exists": False}
+
+
+# --- insert_idea ---
+
+
+@pytest.mark.unit
+def test_insert_idea_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_idea
+
+    insert_idea("Some Idea", "raw_idea")
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO ideas" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_idea_passes_name_and_status_as_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_idea
+
+    insert_idea("Some Idea", "raw_idea")
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO ideas" in str(c)
+    )
+    assert insert_call.args[1] == ("Some Idea", "raw_idea")

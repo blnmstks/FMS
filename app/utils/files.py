@@ -12,3 +12,8 @@ def save_to_vault(content: str, name: str, vault_path: str, subfolder: str) -> s
     filename = f"{name}.md"
     (folder / filename).write_text(content, encoding="utf-8")
     return filename
+
+
+def read_from_vault(name: str, vault_path: str, subfolder: str) -> str:
+    """Read content of <name> stored inside vault_path/subfolder/."""
+    return (Path(vault_path) / subfolder / name).read_text(encoding="utf-8")

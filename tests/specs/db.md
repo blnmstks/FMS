@@ -111,19 +111,61 @@ Saves style analysis fields. If a row already exists — UPDATE; otherwise — I
 ## `migrate_ideas_table() -> None`
 
 ### Contract
-Создаёт ENUM-тип `idea_status` и таблицу `ideas`, если они ещё не существуют.
+Создаёт ENUM-тип `idea_status` и таблицу `ideas`, если они ещё не существуют, и
+идемпотентно дополняет существующий тип всеми значениями из `IDEAS_STATUSES`
+(включая `raw_idea` — самую раннюю стадию жизненного цикла).
 
 SQL, который выполняется:
-1. `CREATE TYPE IF NOT EXISTS idea_status AS ENUM ('scenario_finished', 'clips_visual_style_finished', 'image_prompt_finished', 'av_prompts_finished', 'audio_generated', 'clips_generated', 'video_done')`
-2. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
+1. `DO $$ BEGIN CREATE TYPE idea_status AS ENUM (...все значения IDEAS_STATUSES...); EXCEPTION WHEN duplicate_object THEN NULL; END $$` — создаёт тип, если его нет.
+2. Для каждого значения из `IDEAS_STATUSES`: `ALTER TYPE idea_status ADD VALUE IF NOT EXISTS '<value>'` — добавляет недостающие значения в уже существующий тип.
+3. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
+
+`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `av_prompts_finished`, `audio_generated`, `clips_generated`, `video_done`.
 
 Всегда вызывает `conn.commit()`.
 
 ### Invariants
-1. Безопасно запускать многократно (оба оператора с IF NOT EXISTS — идемпотентна).
-2. Всегда коммитит.
+1. Безопасно запускать многократно (DO-блок + `ADD VALUE IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` — идемпотентна).
+2. Существующий тип без новых значений дополняется через `ALTER TYPE ADD VALUE IF NOT EXISTS`.
+3. Всегда коммитит.
 
 ### Test cases
-- **выполняет CREATE TYPE**: `cur.execute` вызывается с SQL содержащим `CREATE TYPE IF NOT EXISTS idea_status`
+- **создаёт тип**: `cur.execute` вызывается с SQL содержащим `idea_status` и всеми значениями `IDEAS_STATUSES`
+- **дополняет тип**: `cur.execute` вызывается с SQL содержащим `ALTER TYPE idea_status ADD VALUE IF NOT EXISTS`
 - **выполняет CREATE TABLE**: `cur.execute` вызывается с SQL содержащим `CREATE TABLE IF NOT EXISTS ideas`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `fetch_raw_idea() -> dict`
+
+### Contract
+Читает первую идею со статусом `raw_idea` из таблицы `ideas`. Аргументов нет.
+
+| Condition | Returns |
+|-----------|---------|
+| Есть строка со `status = 'raw_idea'` | `{"idea_id": <id>, "idea_name": <name>, "raw_idea_exists": True}` |
+| Строки нет | `{"raw_idea_exists": False}` |
+
+### Invariants
+1. Никогда не падает при отсутствии строки — возвращает `{"raw_idea_exists": False}`.
+2. Возвращает ровно 3 ключа когда строка найдена, ровно 1 ключ когда нет.
+
+### Test cases
+- **строка есть**: cursor возвращает `(7, "My Idea")` → `{"idea_id": 7, "idea_name": "My Idea", "raw_idea_exists": True}`
+- **строки нет**: cursor возвращает `None` → `{"raw_idea_exists": False}`
+
+---
+
+## `insert_idea(name: str, status: str) -> None`
+
+### Contract
+Вставляет новую строку в `ideas`: `INSERT INTO ideas (name, status) VALUES (%s, %s)`.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Всегда `INSERT` (без проверки существования) — каждая идея новая строка.
+
+### Test cases
+- **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO ideas`, параметры `(name, status)`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз

@@ -93,3 +93,44 @@ def test_migrate_ideas_table_creates_table(pg_container, monkeypatch):
     with psycopg.connect(pg_container) as conn:
         count = conn.execute("SELECT COUNT(*) FROM ideas").fetchone()[0]
     assert count == 0
+
+
+@pytest.mark.integration
+def test_insert_idea_then_fetch_raw_idea_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+
+    assert db.fetch_raw_idea() == {"raw_idea_exists": False}
+
+    db.insert_idea("My great idea", "raw_idea")
+    result = db.fetch_raw_idea()
+
+    assert result["raw_idea_exists"] is True
+    assert result["idea_name"] == "My great idea"
+    assert isinstance(result["idea_id"], int)
+
+
+@pytest.mark.integration
+def test_migrate_ideas_table_idempotent(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    # Повторный запуск миграции не должен падать (тип и таблица уже существуют).
+    db.migrate_ideas_table()
+    db.migrate_ideas_table()

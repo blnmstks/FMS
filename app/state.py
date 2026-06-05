@@ -16,3 +16,8 @@ class ProjectState(TypedDict, total=False):
     channel_style: dict
     channel_style_complete: bool
     transcript_obsidian_files: list[str]
+    # step 4: video idea selection
+    generated_ideas: list[str]
+    idea_name: str
+    idea_id: int
+    raw_idea_exists: bool
