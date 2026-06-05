@@ -72,7 +72,37 @@
   `5 in executed_steps`
 - идеи нет: результат содержит `pipeline_step == 6`, `5 in executed_steps`; LLM не вызван
 
-## Стабы шагов 6–12 — фабрика `_make_stub(n)`
+## `s6_visual_style(state) -> dict`
+Шаг 6: по идее со статусом `scenario_finished` генерирует визуальный стиль клипов через ИИ
+на основе приложенных изображений + сценария + Style DNA канала и сохраняет 7 полей стиля в
+`visual_styles` (per-idea upsert), переводит идею в `clips_visual_style_finished`.
+Узел самодостаточен (не доверяет state — диспетчер может завести сюда в свежем прогоне).
+
+Ветка «идея найдена»:
+- `scenario_text = (fetch_rows("scenarios","idea", idea_id) or [{}])[0].get("scenario","")`;
+- `paths_raw = interrupt("STATE 6 — Paste paths to reference images (comma-separated, ~5):")`,
+  `paths = [p.strip() for p in paths_raw.split(",") if p.strip()]`;
+- `scenario_id` берётся из той же строки (`scenarios[0]["id"]`);
+- `style = fetch_channel_style_info()`;
+- `profile = generate_visual_style(idea_name, scenario_text, style, paths)`;
+- `visual = {f: profile[f] for f in VISUAL_STYLE_FIELDS}`; `upsert_visual_styles(visual, idea_id)`;
+- персонажи сохраняются: `insert_characters(profile.get("characters") or [], scenario_id)`
+  (если `scenario_id` есть);
+- `update_idea_status(idea_id, "clips_visual_style_finished")`;
+- `_advance(state, 6, {"idea_id": idea_id, "idea_name": idea_name})`.
+
+Если идеи внезапно нет — защитный `_advance(state, 6)` без работы.
+
+### Test cases
+- идея есть (мок `interrupt`→пути, `fetch_rows`→`[{"id":3,"scenario":"SCEN"}]`,
+  `fetch_channel_style_info`, `generate_visual_style`→7 полей + characters): вызваны
+  `upsert_visual_styles(<7 полей>, idea_id)`,
+  `insert_characters(profile["characters"], 3)` и
+  `update_idea_status(idea_id, "clips_visual_style_finished")`; `pipeline_step == 7`,
+  `6 in executed_steps`
+- идеи нет: `pipeline_step == 7`, `6 in executed_steps`; LLM и `insert_characters` не вызваны
+
+## Стабы шагов 7–12 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 

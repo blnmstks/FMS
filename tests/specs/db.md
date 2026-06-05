@@ -308,7 +308,9 @@ CREATE TABLE IF NOT EXISTS scenarios (
 смысл — `child.<fk_column> -> parent.id`. Единственный источник истины для `fetch_related`.
 Текущее содержимое:
 - `("visual_styles", "channel_info", "channel_info")`
+- `("visual_styles", "idea", "ideas")`
 - `("scenarios", "idea", "ideas")`
+- `("characters_sheet", "scenario", "scenarios")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -318,8 +320,8 @@ CREATE TABLE IF NOT EXISTS scenarios (
 ## `migrate_visual_styles_table() -> None`
 
 ### Contract
-Идемпотентно создаёт таблицу `visual_styles`. Запускать после того, как существует
-`channel_info` (FK `channel_info` ссылается на `channel_info(id)`).
+Идемпотентно создаёт таблицу `visual_styles` (визуальный стиль клипов, привязка к идее).
+Запускать после `channel_info` (FK `channel_info`) и после `ideas` (FK `idea`).
 
 SQL:
 ```sql
@@ -327,47 +329,52 @@ CREATE TABLE IF NOT EXISTS visual_styles (
     id SERIAL PRIMARY KEY,
     art_style TEXT, color_pallet TEXT, lighting_style TEXT,
     camera_style TEXT, composition TEXT, detail_level TEXT, mood TEXT,
-    channel_info INTEGER REFERENCES channel_info(id)
+    channel_info INTEGER REFERENCES channel_info(id),
+    idea INTEGER REFERENCES ideas(id)
 )
 ```
+Плюс идемпотентный апгрейд для уже существующих таблиц:
+`ALTER TABLE visual_styles ADD COLUMN IF NOT EXISTS idea INTEGER REFERENCES ideas(id)`.
 Колонки стиля генерируются из `VISUAL_STYLE_FIELDS`. Всегда вызывает `conn.commit()`.
 
 ### Invariants
-1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS` + `ADD COLUMN IF NOT EXISTS`).
 2. Все колонки из `VISUAL_STYLE_FIELDS` присутствуют в DDL.
-3. Колонка `channel_info` — внешний ключ на `channel_info(id)`.
+3. Колонка `channel_info` — FK на `channel_info(id)`; колонка `idea` — FK на `ideas(id)`.
 4. Всегда коммитит.
 
 ### Test cases
 - **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS visual_styles`
 - **все поля**: SQL содержит каждое имя из `VISUAL_STYLE_FIELDS`
-- **FK**: SQL содержит `REFERENCES channel_info`
+- **FK на ideas**: SQL содержит `REFERENCES ideas`
+- **idea-колонка**: SQL содержит `idea`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 
 ---
 
-## `upsert_visual_styles(style: dict, channel_id: int) -> None`
+## `upsert_visual_styles(style: dict, idea_id: int) -> None`
 
 ### Contract
-Сохраняет визуальный стиль канала — **одна строка на канал**. Ключ поиска — колонка
-`channel_info`: `SELECT id FROM visual_styles WHERE channel_info=%s LIMIT 1`.
+Сохраняет визуальный стиль клипов — **одна строка на идею**. Ключ поиска — колонка
+`idea`: `SELECT id FROM visual_styles WHERE idea=%s LIMIT 1`.
 
 | Condition | SQL executed |
 |-----------|-------------|
-| Строка найдена | `UPDATE visual_styles SET <VISUAL_STYLE_FIELDS, channel_info> WHERE id=%s` |
-| Строки нет | `INSERT INTO visual_styles (<VISUAL_STYLE_FIELDS, channel_info>) VALUES (...)` |
+| Строка найдена | `UPDATE visual_styles SET <VISUAL_STYLE_FIELDS, idea> WHERE id=%s` |
+| Строки нет | `INSERT INTO visual_styles (<VISUAL_STYLE_FIELDS, idea>) VALUES (...)` |
 
-Значения: `[style[f] for f in VISUAL_STYLE_FIELDS] + [channel_id]`. Всегда `conn.commit()`.
+Значения: `[style[f] for f in VISUAL_STYLE_FIELDS] + [idea_id]`. Колонка `channel_info` не
+заполняется (NULL — под будущее brand-уровневое использование). Всегда `conn.commit()`.
 
 ### Invariants
 1. Всегда вызывает `conn.commit()`.
 2. Не вызывает UPDATE и INSERT в одном вызове.
-3. Поиск существующей строки идёт по `channel_info`, а не по «первой строке».
+3. Поиск существующей строки идёт по `idea`.
 
 ### Test cases
 - **существующая строка**: `fetchone()=(1,)` → UPDATE, не INSERT
 - **новая строка**: `fetchone()=None` → INSERT, не UPDATE
-- **поиск по каналу**: SELECT содержит `WHERE channel_info`
+- **поиск по идее**: SELECT содержит `WHERE idea`, параметр `(idea_id,)`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 
 ---
@@ -433,4 +440,66 @@ CREATE TABLE IF NOT EXISTS visual_styles (
 ### Test cases
 - **источник-родитель** (`channel_info`): `children["visual_styles"]` — список строк
 - **источник-потомок** (`scenarios`): `parents["ideas"]` — `dict` строки идеи
+
+---
+
+## `migrate_characters_sheet_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `characters_sheet` (персонажи сценария). Запускать после
+миграции `scenarios` (FK `scenario`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS characters_sheet (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    face JSONB,
+    build TEXT,
+    outfit JSONB,
+    baseline_neutral_expression TEXT,
+    scenario INTEGER REFERENCES scenarios(id)
+)
+```
+Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. `face` и `outfit` — `JSONB`; `scenario` — FK на `scenarios(id)`.
+3. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS characters_sheet`
+- **JSONB**: SQL содержит `JSONB`
+- **FK на scenarios**: SQL содержит `REFERENCES scenarios`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `insert_characters(characters: list[dict], scenario_id: int) -> None`
+
+### Contract
+Идемпотентно пересоздаёт набор персонажей сценария: сперва
+`DELETE FROM characters_sheet WHERE scenario=%s`, затем на каждый персонаж
+`INSERT INTO characters_sheet (name, face, build, outfit, baseline_neutral_expression,
+scenario) VALUES (%s,%s,%s,%s,%s,%s)`.
+
+Маппинг из формата LLM (Character Reference Sheet): `name=char.get("label")`,
+`face=Jsonb(char.get("face"))`, `build=char.get("build")`,
+`outfit=Jsonb(char.get("outfit"))`,
+`baseline_neutral_expression=char.get("baseline_neutral_expression")`,
+последний параметр — `scenario_id`. Всегда `conn.commit()`.
+
+### Invariants
+1. Перед вставкой удаляет существующих персонажей сценария (delete-then-insert).
+2. `face`/`outfit` пишутся как JSONB через `Jsonb(...)`.
+3. Число INSERT равно числу персонажей; пустой список → только DELETE.
+4. Всегда коммитит.
+
+### Test cases
+- **delete + insert**: для 2 персонажей — один `DELETE FROM characters_sheet`, два
+  `INSERT INTO characters_sheet`; в параметрах первого INSERT `name="Jack"` и последний
+  параметр — `scenario_id`
+- **пустой список**: только `DELETE`, нет `INSERT`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
 

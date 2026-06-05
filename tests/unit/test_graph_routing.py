@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pytest
 from langgraph.graph import END
 
+from app.db import VISUAL_STYLE_FIELDS
 from app.graph import (
     _make_stub,
     _route_dispatch,
@@ -10,6 +11,7 @@ from app.graph import (
     _route_s4,
     dispatch,
     s5_scenario,
+    s6_visual_style,
     select_target_step,
 )
 
@@ -160,7 +162,53 @@ def test_s5_scenario_advances_without_work_when_no_idea():
     assert 5 in result["executed_steps"]
 
 
-# --- stub factory s6..s12 ---
+# --- s6_visual_style ---
+
+
+@pytest.mark.unit
+def test_s6_visual_style_generates_saves_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    profile = {f: f"val_{f}" for f in VISUAL_STYLE_FIELDS}
+    profile["characters"] = [{"label": "Jack"}]
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", return_value=[{"id": 3, "scenario": "SCEN"}]),
+        patch("app.graph.interrupt", return_value="a.jpg, b.jpg"),
+        patch("app.graph.fetch_channel_style_info", return_value={}),
+        patch("app.graph.generate_visual_style", return_value=profile) as gen,
+        patch("app.graph.upsert_visual_styles") as ups,
+        patch("app.graph.insert_characters") as ins_chars,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s6_visual_style({})
+
+    gen.assert_called_once()
+    expected_style = {f: f"val_{f}" for f in VISUAL_STYLE_FIELDS}
+    ups.assert_called_once_with(expected_style, 7)
+    ins_chars.assert_called_once_with(profile["characters"], 3)
+    upd.assert_called_once_with(7, "clips_visual_style_finished")
+    assert result["pipeline_step"] == 7
+    assert 6 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s6_visual_style_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.generate_visual_style") as gen,
+        patch("app.graph.insert_characters") as ins_chars,
+        patch("app.graph.interrupt") as itr,
+    ):
+        result = s6_visual_style({})
+
+    gen.assert_not_called()
+    ins_chars.assert_not_called()
+    itr.assert_not_called()
+    assert result["pipeline_step"] == 7
+    assert 6 in result["executed_steps"]
+
+
+# --- stub factory s7..s12 ---
 
 
 @pytest.mark.unit

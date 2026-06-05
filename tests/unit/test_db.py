@@ -491,7 +491,20 @@ def test_migrate_visual_styles_table_creates_table_with_fk(mock_psycopg_connect)
     calls = [str(c) for c in mock_cursor.execute.call_args_list]
     assert any("CREATE TABLE IF NOT EXISTS visual_styles" in c for c in calls)
     assert any("REFERENCES channel_info" in c for c in calls)
+    assert any("REFERENCES ideas" in c for c in calls)
     mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_visual_styles_table_has_idea_column(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_visual_styles_table
+
+    migrate_visual_styles_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("idea" in c and "REFERENCES ideas" in c for c in calls)
 
 
 @pytest.mark.unit
@@ -547,7 +560,7 @@ def test_upsert_visual_styles_calls_insert_when_no_row(mock_psycopg_connect):
 
 
 @pytest.mark.unit
-def test_upsert_visual_styles_lookup_by_channel(mock_psycopg_connect):
+def test_upsert_visual_styles_lookup_by_idea(mock_psycopg_connect):
     _, _, mock_cursor = mock_psycopg_connect
     mock_cursor.fetchone.return_value = None
 
@@ -559,7 +572,7 @@ def test_upsert_visual_styles_lookup_by_channel(mock_psycopg_connect):
     select_call = next(
         c for c in mock_cursor.execute.call_args_list if "SELECT id FROM visual_styles" in str(c)
     )
-    assert "WHERE channel_info" in str(select_call)
+    assert "WHERE idea" in str(select_call)
     assert select_call.args[1] == (5,)
 
 
@@ -657,10 +670,12 @@ def test_fetch_related_collects_children_for_parent_source(mock_psycopg_connect)
 @pytest.mark.unit
 def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
     _, _, mock_cursor = mock_psycopg_connect
-    # scenarios — источник-потомок: ребро (scenarios, idea, ideas).
-    # Первый fetch_row_by_id -> строка сценария с idea=7; второй -> строка идеи.
+    # scenarios — источник-потомок (ребро scenarios→ideas) и одновременно родитель для
+    # characters_sheet (ребро characters_sheet→scenarios).
+    # fetch_row_by_id: сценарий с idea=7, затем строка идеи; fetch_rows(characters) → [].
     mock_cursor.description = [("id",), ("scenario",), ("idea",)]
     mock_cursor.fetchone.side_effect = [(5, "text", 7), (7, "name", "raw_idea")]
+    mock_cursor.fetchall.return_value = []
 
     from app.db import fetch_related
 
@@ -668,4 +683,88 @@ def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
 
     assert result["source"]["idea"] == 7
     assert result["parents"]["ideas"]["id"] == 7
-    assert result["children"] == {}
+    assert result["children"] == {"characters_sheet": []}
+
+
+# --- migrate_characters_sheet_table ---
+
+
+@pytest.mark.unit
+def test_migrate_characters_sheet_table_creates_table(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_characters_sheet_table
+
+    migrate_characters_sheet_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS characters_sheet" in c for c in calls)
+    assert any("JSONB" in c for c in calls)
+    assert any("REFERENCES scenarios" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+# --- insert_characters ---
+
+
+def _sample_characters():
+    return [
+        {
+            "label": "Jack",
+            "face": {"hair": "black"},
+            "build": "tall",
+            "outfit": {"item_1": {"color": "red"}},
+            "baseline_neutral_expression": "calm",
+        },
+        {
+            "label": "Anna",
+            "face": {"hair": "blonde"},
+            "build": "short",
+            "outfit": {"item_1": {"color": "blue"}},
+            "baseline_neutral_expression": "stern",
+        },
+    ]
+
+
+@pytest.mark.unit
+def test_insert_characters_deletes_then_inserts(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_characters
+
+    insert_characters(_sample_characters(), 3)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert sum("DELETE FROM characters_sheet" in c for c in calls) == 1
+    assert sum("INSERT INTO characters_sheet" in c for c in calls) == 2
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_characters_maps_label_and_scenario(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_characters
+
+    insert_characters(_sample_characters(), 3)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO characters_sheet" in str(c)
+    )
+    params = insert_call.args[1]
+    assert params[0] == "Jack"
+    assert params[-1] == 3
+
+
+@pytest.mark.unit
+def test_insert_characters_empty_list_only_deletes(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_characters
+
+    insert_characters([], 3)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("DELETE FROM characters_sheet" in c for c in calls)
+    assert not any("INSERT INTO characters_sheet" in c for c in calls)
+    mock_conn.commit.assert_called_once()

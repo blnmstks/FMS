@@ -1,6 +1,7 @@
 import json
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app.config import DB_URL
 
@@ -51,7 +52,9 @@ VISUAL_STYLE_FIELDS = [
 # пользовательского ввода — поэтому их безопасно подставлять в SQL f-строкой.
 RELATION_EDGES = [
     ("visual_styles", "channel_info", "channel_info"),
+    ("visual_styles", "idea", "ideas"),
     ("scenarios", "idea", "ideas"),
+    ("characters_sheet", "scenario", "scenarios"),
 ]
 
 
@@ -160,6 +163,51 @@ def insert_scenario(scenario: str, idea_id: int) -> None:
                 "INSERT INTO scenarios (scenario, idea) VALUES (%s, %s)",
                 (scenario, idea_id),
             )
+        conn.commit()
+
+
+def migrate_characters_sheet_table() -> None:
+    # Идемпотентно создаёт таблицу characters_sheet (персонажи сценария). face/outfit — JSONB,
+    # scenario — внешний ключ на scenarios(id). Запускать после миграции scenarios.
+    # Безопасно запускать многократно (CREATE TABLE IF NOT EXISTS).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS characters_sheet (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT,
+                    face JSONB,
+                    build TEXT,
+                    outfit JSONB,
+                    baseline_neutral_expression TEXT,
+                    scenario INTEGER REFERENCES scenarios(id)
+                )
+            """)
+        conn.commit()
+
+
+def insert_characters(characters: list[dict], scenario_id: int) -> None:
+    # Идемпотентно пересоздаёт набор персонажей сценария: сначала удаляет существующих
+    # персонажей этого сценария, затем вставляет переданных. Формат персонажа — из ответа
+    # LLM (Character Reference Sheet): label/face/build/outfit/baseline_neutral_expression.
+    # face/outfit пишутся как JSONB через Jsonb(...).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM characters_sheet WHERE scenario=%s", (scenario_id,))
+            for char in characters:
+                cur.execute(
+                    "INSERT INTO characters_sheet "
+                    "(name, face, build, outfit, baseline_neutral_expression, scenario) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        char.get("label"),
+                        Jsonb(char.get("face")),
+                        char.get("build"),
+                        Jsonb(char.get("outfit")),
+                        char.get("baseline_neutral_expression"),
+                        scenario_id,
+                    ),
+                )
         conn.commit()
 
 
@@ -290,9 +338,10 @@ def upsert_channel_info(data: dict) -> None:
 
 
 def migrate_visual_styles_table() -> None:
-    # Идемпотентно создаёт таблицу visual_styles. Колонки стиля берутся из VISUAL_STYLE_FIELDS,
-    # channel_info — внешний ключ на channel_info(id). Запускать после того, как channel_info
-    # уже существует. Безопасно запускать многократно (CREATE TABLE IF NOT EXISTS).
+    # Идемпотентно создаёт таблицу visual_styles (визуальный стиль клипов, привязка к идее).
+    # Колонки стиля берутся из VISUAL_STYLE_FIELDS; channel_info — FK на channel_info(id),
+    # idea — FK на ideas(id). Запускать после миграций channel_info и ideas. Для уже
+    # существующих таблиц колонка idea добавляется идемпотентно через ALTER ... IF NOT EXISTS.
     style_cols = ",\n                    ".join(f"{f} TEXT" for f in VISUAL_STYLE_FIELDS)
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -300,20 +349,25 @@ def migrate_visual_styles_table() -> None:
                 CREATE TABLE IF NOT EXISTS visual_styles (
                     id SERIAL PRIMARY KEY,
                     {style_cols},
-                    channel_info INTEGER REFERENCES channel_info(id)
+                    channel_info INTEGER REFERENCES channel_info(id),
+                    idea INTEGER REFERENCES ideas(id)
                 )
             """)
+            cur.execute(
+                "ALTER TABLE visual_styles ADD COLUMN IF NOT EXISTS idea "
+                "INTEGER REFERENCES ideas(id)"
+            )
         conn.commit()
 
 
-def upsert_visual_styles(style: dict, channel_id: int) -> None:
-    # Сохраняет визуальный стиль канала — одна строка на канал. Ключ поиска — колонка
-    # channel_info. Если строка для канала есть — UPDATE, иначе INSERT.
-    cols = VISUAL_STYLE_FIELDS + ["channel_info"]
-    values = [style[f] for f in VISUAL_STYLE_FIELDS] + [channel_id]
+def upsert_visual_styles(style: dict, idea_id: int) -> None:
+    # Сохраняет визуальный стиль клипов — одна строка на идею. Ключ поиска — колонка idea.
+    # Если строка для идеи есть — UPDATE, иначе INSERT. channel_info не заполняется (NULL).
+    cols = VISUAL_STYLE_FIELDS + ["idea"]
+    values = [style[f] for f in VISUAL_STYLE_FIELDS] + [idea_id]
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM visual_styles WHERE channel_info=%s LIMIT 1", (channel_id,))
+            cur.execute("SELECT id FROM visual_styles WHERE idea=%s LIMIT 1", (idea_id,))
             existing = cur.fetchone()
             if existing:
                 set_clause = ", ".join(f"{c}=%s" for c in cols)

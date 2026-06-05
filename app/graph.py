@@ -5,19 +5,24 @@ from app.config import VAULT_PATH
 from app.db import (
     IDEAS_STATUSES,
     STYLE_FIELDS,
+    VISUAL_STYLE_FIELDS,
     fetch_channel_info,
     fetch_channel_style_info,
     fetch_idea_by_status,
     fetch_present_idea_statuses,
     fetch_raw_idea,
+    fetch_rows,
+    insert_characters,
     insert_idea,
     insert_scenario,
     update_idea_status,
+    upsert_visual_styles,
 )
 from app.services.branding import analyze_channel
 from app.services.ideas import generate_video_ideas
 from app.services.scenarios import generate_scenario
 from app.services.transcripts import analyze_transcripts
+from app.services.visual_styles import generate_visual_style
 from app.state import ProjectState
 from app.utils.files import read_from_vault, read_text_file, save_to_vault
 
@@ -280,8 +285,45 @@ def s5_scenario(state: ProjectState) -> dict:
     return _advance(state, 5, {"idea_id": idea_id, "idea_name": idea_name, "raw_idea_exists": True})
 
 
+def s6_visual_style(state: ProjectState) -> dict:
+    # Шаг 6: по idea со статусом scenario_finished генерирует визуальный стиль клипов через ИИ
+    # на основе приложенных изображений + сценария + Style DNA канала и сохраняет 7 полей стиля
+    # в visual_styles (per-idea upsert), переводит идею в clips_visual_style_finished.
+    # Узел самодостаточен (не доверяет state — диспетчер может завести сюда в свежем прогоне).
+    idea = fetch_idea_by_status("scenario_finished")
+    if not idea.get("exists"):
+        return _advance(state, 6)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+    print(f"\nSTATE 6 — extracting visual style for idea: {idea_name}")
+
+    scenarios = fetch_rows("scenarios", "idea", idea_id)
+    scenario_row = scenarios[0] if scenarios else {}
+    scenario_text = scenario_row.get("scenario", "")
+    scenario_id = scenario_row.get("id")
+
+    paths_raw = interrupt("STATE 6 — Paste paths to reference images (comma-separated, ~5):")
+    paths = [p.strip() for p in paths_raw.split(",") if p.strip()]
+
+    style = fetch_channel_style_info()
+    profile = generate_visual_style(idea_name, scenario_text, style, paths)
+
+    visual = {f: profile[f] for f in VISUAL_STYLE_FIELDS}
+    upsert_visual_styles(visual, idea_id)
+
+    characters = profile.get("characters") or []
+    if scenario_id is not None:
+        insert_characters(characters, scenario_id)
+    print(f"STATE 6 — saved {len(characters)} character(s) for scenario {scenario_id}")
+
+    update_idea_status(idea_id, "clips_visual_style_finished")
+    print(f"STATE 6 — visual style saved and idea marked clips_visual_style_finished: {idea_name}")
+    return _advance(state, 6, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 6..12: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 7..12: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -322,7 +364,8 @@ g.add_node("s4", s4_ideas)
 g.add_node("s4_pick", s4_pick)
 g.add_node("dispatch", dispatch)
 g.add_node("s5", s5_scenario)
-for _n in range(6, 13):  # шаги 6..12 — заглушки из фабрики
+g.add_node("s6", s6_visual_style)
+for _n in range(7, 13):  # шаги 7..12 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")
