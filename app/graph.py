@@ -211,10 +211,20 @@ def s4_pick(state: ProjectState) -> dict:
     return {"idea_name": chosen}
 
 
-def s5_stub(state: ProjectState) -> dict:
-    # Шаг 5 (заглушка): дальнейшая работа с выбранной raw-идеей.
-    print(f"\nSTATE 5 — (заглушка) working with raw idea: {state.get('idea_name')}")
-    return {}
+def s5_scenario(_: ProjectState) -> dict:
+    # Шаг 5: берём идею со статусом raw_idea из БД (источник истины).
+    # Если её нет — сообщаем и роутер отправит обратно на шаг 4.
+    idea = fetch_raw_idea()
+    if not idea.get("raw_idea_exists"):
+        print("there is no idea for scenario")
+        return {"raw_idea_exists": False}
+    # raw_idea найдена — заглушка под генерацию сценария (следующая часть шага 5).
+    print(f"\nSTATE 5 — working with raw idea: {idea['idea_name']}")
+    return {
+        "idea_id": idea["idea_id"],
+        "idea_name": idea["idea_name"],
+        "raw_idea_exists": True,
+    }
 
 
 def _route_s1(state: ProjectState) -> str:
@@ -228,6 +238,11 @@ def _route_s4(state: ProjectState) -> str:
     return "s4_pick" if state.get("generated_ideas") else "s5"
 
 
+def _route_s5(state: ProjectState) -> str:
+    # Маршрутизатор после шага 5: нет raw_idea — обратно на шаг 4, иначе завершение.
+    return "s4" if not state.get("raw_idea_exists") else END
+
+
 g = StateGraph(ProjectState)
 
 g.add_node("s1", s1_channel)
@@ -235,7 +250,7 @@ g.add_node("s2", s2_branding)
 g.add_node("s3", s3_transcripts)
 g.add_node("s4", s4_ideas)
 g.add_node("s4_pick", s4_pick)
-g.add_node("s5", s5_stub)
+g.add_node("s5", s5_scenario)
 
 g.add_edge(START, "s1")
 g.add_conditional_edges("s1", _route_s1, {"s2": "s2", "s3": "s3"})
@@ -243,7 +258,7 @@ g.add_edge("s2", "s3")
 g.add_edge("s3", "s4")
 g.add_conditional_edges("s4", _route_s4, {"s4_pick": "s4_pick", "s5": "s5"})
 g.add_edge("s4_pick", "s5")
-g.add_edge("s5", END)
+g.add_conditional_edges("s5", _route_s5, {"s4": "s4", END: END})
 
 
 def build_app(checkpointer):
