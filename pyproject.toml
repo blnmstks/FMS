@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary]",
     "python-dotenv",
     "openai>=1.0",
+    "requests",
 ]
 
 [project.optional-dependencies]
