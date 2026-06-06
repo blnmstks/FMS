@@ -312,6 +312,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
 - `("scenarios", "idea", "ideas")`
 - `("characters_sheet", "scenario", "scenarios")`
 - `("image_prompts", "scenario", "scenarios")`
+- `("images", "image_prompt", "image_prompts")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -558,5 +559,69 @@ CREATE TABLE IF NOT EXISTS image_prompts (
 ### Test cases
 - **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO image_prompts`
 - **последний параметр — scenario_id**: параметры INSERT заканчиваются `scenario_id`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `migrate_images_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `images` — реестр **сгенерированных** картинок. В БД хранится
+не абсолютный путь, а storage-agnostic ключ (`key`) + маркер бэкенда (`storage`), чтобы переезд
+на S3 не требовал миграции схемы. Запускать **после** `migrate_image_prompts_table` (FK
+`image_prompt` ссылается на `image_prompts(id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS images (
+    id SERIAL PRIMARY KEY,
+    storage TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
+    role TEXT,
+    image_prompt INTEGER REFERENCES image_prompts(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+- `storage` — бэкенд (`local` / в будущем `s3`); DEFAULT — страховка на уровне схемы.
+- `key` — относительный ключ файла (напр. `generated/image_prompt/57/01.png`).
+- `role` — назначение картинки; пока единственное значение `generated`.
+- `created_at` — заполняется БД (DEFAULT `now()`).
+
+Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Колонки: `id`, `storage`, `key`, `role`, `image_prompt`, `created_at`.
+3. Колонка `image_prompt` — FK на `image_prompts(id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS images`
+- **FK на image_prompts**: SQL содержит `REFERENCES image_prompts`
+- **колонки**: SQL содержит `storage`, `key`, `role`, `image_prompt`, `created_at`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `insert_image(storage: str, key: str, role: str, image_prompt_id: int) -> None`
+
+### Contract
+Регистрирует сгенерированную картинку, связывая её с image-prompt:
+`INSERT INTO images (storage, key, role, image_prompt) VALUES (%s,%s,%s,%s)`. Значения:
+`(storage, key, role, image_prompt_id)`. Колонка `created_at` не передаётся — её заполняет БД
+(DEFAULT `now()`). Всегда `conn.commit()`.
+
+Все аргументы явные, без дефолтов: знание «storage=local, role=generated» — бизнес-логика
+будущего сервиса, а не слоя БД (db.py = SQL only).
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Всегда `INSERT` (без проверки существования) — каждая картинка новая строка.
+3. Параметры в порядке `(storage, key, role, image_prompt_id)`; последний — `image_prompt_id`.
+
+### Test cases
+- **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO images`
+- **параметры**: параметры INSERT == `(storage, key, role, image_prompt_id)`, последний —
+  `image_prompt_id`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 

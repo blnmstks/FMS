@@ -834,3 +834,78 @@ def test_insert_image_prompt_last_param_is_scenario_id(mock_psycopg_connect):
         c for c in mock_cursor.execute.call_args_list if "INSERT INTO image_prompts" in str(c)
     )
     assert insert_call.args[1][-1] == 3
+
+
+# --- migrate_images_table ---
+
+
+@pytest.mark.unit
+def test_migrate_images_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_images_table
+
+    migrate_images_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS images" in c for c in calls)
+    assert any("REFERENCES image_prompts" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_images_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_images_table
+
+    migrate_images_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS images" in str(c)
+    )
+    for col in ("storage", "key", "role", "image_prompt", "created_at"):
+        assert col in create_call
+
+
+# --- insert_image ---
+
+
+@pytest.mark.unit
+def test_insert_image_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_image
+
+    insert_image("local", "generated/image_prompt/3/01.png", "generated", 3)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO images" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_image_passes_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_image
+
+    insert_image("local", "generated/image_prompt/3/01.png", "generated", 3)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO images" in str(c)
+    )
+    assert insert_call.args[1] == ("local", "generated/image_prompt/3/01.png", "generated", 3)
+    assert insert_call.args[1][-1] == 3
+
+
+# --- RELATION_EDGES ---
+
+
+@pytest.mark.unit
+def test_relation_edges_includes_images():
+    from app.db import RELATION_EDGES
+
+    assert ("images", "image_prompt", "image_prompts") in RELATION_EDGES

@@ -9,6 +9,7 @@ from app.db import (
     migrate_characters_sheet_table,
     migrate_ideas_table,
     migrate_image_prompts_table,
+    migrate_images_table,
     migrate_scenarios_table,
     migrate_visual_styles_table,
     upsert_channel_info,
@@ -27,6 +28,7 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
     migrate_characters_sheet_table()
     migrate_visual_styles_table()
     migrate_image_prompts_table()
+    migrate_images_table()
     app = build_app(checkpointer)
 
     initial_state = fetch_channel_info()

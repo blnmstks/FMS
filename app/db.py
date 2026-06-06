@@ -66,6 +66,7 @@ RELATION_EDGES = [
     ("scenarios", "idea", "ideas"),
     ("characters_sheet", "scenario", "scenarios"),
     ("image_prompts", "scenario", "scenarios"),
+    ("images", "image_prompt", "image_prompts"),
 ]
 
 
@@ -251,6 +252,39 @@ def insert_image_prompt(prompt: dict, scenario_id: int) -> None:
             cur.execute(
                 f"INSERT INTO image_prompts ({col_clause}) VALUES ({placeholders})",
                 values,
+            )
+        conn.commit()
+
+
+def migrate_images_table() -> None:
+    # Идемпотентно создаёт таблицу images — реестр сгенерированных картинок. В БД хранится не
+    # абсолютный путь, а storage-agnostic ключ (key) + маркер бэкенда (storage), чтобы переезд
+    # на S3 не требовал миграции схемы. image_prompt — FK на image_prompts(id); created_at
+    # заполняет БД. Запускать после миграции image_prompts. Безопасно запускать многократно.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS images (
+                    id SERIAL PRIMARY KEY,
+                    storage TEXT NOT NULL DEFAULT 'local',
+                    key TEXT NOT NULL,
+                    role TEXT,
+                    image_prompt INTEGER REFERENCES image_prompts(id),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+        conn.commit()
+
+
+def insert_image(storage: str, key: str, role: str, image_prompt_id: int) -> None:
+    # Регистрирует сгенерированную картинку, связывая её с image-prompt. Каждый вызов — новая
+    # строка. Колонка created_at не передаётся — её заполняет БД (DEFAULT now()). Аргументы
+    # явные, без дефолтов: знание storage=local/role=generated — бизнес-логика будущего сервиса.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO images (storage, key, role, image_prompt) VALUES (%s, %s, %s, %s)",
+                (storage, key, role, image_prompt_id),
             )
         conn.commit()
 
