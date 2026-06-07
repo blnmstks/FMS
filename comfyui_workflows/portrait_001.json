@@ -1,0 +1,175 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "flux-2-klein-4b.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "split_files/text_encoders/qwen_3_4b.safetensors",
+      "type": "flux2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "split_files/vae/flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "4": {
+    "inputs": {
+      "text": "Young man, 28–29 years old. Tall and lanky build, narrow shoulders, very lean frame with long thin arms and legs, flat chest, no visible muscle mass; looks like someone who sits at a desk all day.\nFace: narrow and elongated face shape; prominent, slightly angular cheekbones that show through the lean face; a sharp, well-defined pointed chin; a long straight nose with a slightly angular bridge and a narrow tip; small narrow eyes behind rectangular thin-framed dark glasses, eyes are dark brown and have a permanently wide-open worried expression; thin straight dark eyebrows set close together, often slightly furrowed; small thin lips pressed together in a tense or uncertain expression; small flat ears mostly hidden under the hair; pale, almost ivory skin tone with no freckles or blemishes.\nHair: short, neat, straight dark brown to near-black hair; combed flat on top with a clean side part on the left; no volume or messiness; slightly longer on top than the sides.\nEyes color: dark brown, almost black.\nGlasses: thin rectangular frames in dark charcoal grey or black, small lenses that sit slightly low on the nose bridge.\nOutfit (default): light blue or white button-up shirt, neatly tucked into beige or khaki straight-leg chinos; brown leather belt; dark brown loafers or plain white sneakers. Shirt always fully buttoned except the very top button on casual days. No tie.\nOverall impression: looks like he just received a worrying notification and is trying to stay calm about it; perpetually tense but well put-together.\n, standing neutral arms at sides, full body shot, front view, natural daylight soft, plain white studio background, character reference sheet, 2D cartoon animation style, flat colors, thick black outlines, bright vibrant colors, clean lines",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "5": {
+    "inputs": {
+      "width": 480,
+      "height": 480,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "6": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "8": {
+    "inputs": {
+      "steps": 30,
+      "width": 768,
+      "height": 1024
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2Scheduler"
+    }
+  },
+  "9": {
+    "inputs": {
+      "noise_seed": 220801096349590
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "11": {
+    "inputs": {
+      "samples": [
+        "18",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "12": {
+    "inputs": {
+      "filename_prefix": "scenario_engine",
+      "images": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "15": {
+    "inputs": {
+      "conditioning": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "18": {
+    "inputs": {
+      "noise": [
+        "9",
+        0
+      ],
+      "guider": [
+        "6",
+        0
+      ],
+      "sampler": [
+        "20",
+        0
+      ],
+      "sigmas": [
+        "8",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "20": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  }
+}

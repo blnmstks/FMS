@@ -13,6 +13,7 @@ from app.graph import (
     s5_scenario,
     s6_visual_style,
     s7_image_prompt,
+    s8_generate_image,
     select_target_step,
 )
 
@@ -286,15 +287,80 @@ def test_s7_image_prompt_advances_without_work_when_no_idea():
     assert 7 in result["executed_steps"]
 
 
-# --- stub factory s8..s12 ---
+# --- s8_generate_image ---
+
+
+def _fetch_rows_for_s8(table, column, value):
+    return {
+        "scenarios": [{"id": 3, "scenario": "SCEN"}],
+        "image_prompts": [{"id": 9, **{f: f"v_{f}" for f in IMAGE_PROMPT_FIELDS}}],
+    }[table]
+
+
+@pytest.mark.unit
+def test_s8_generate_image_generates_registers_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s8),
+        patch("app.graph.generate_first_beat_image", return_value="assets/images/x.png") as gen,
+        patch("app.graph.insert_image") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s8_generate_image({})
+
+    gen.assert_called_once()
+    image_prompt_row = {"id": 9, **{f: f"v_{f}" for f in IMAGE_PROMPT_FIELDS}}
+    assert gen.call_args.args == (image_prompt_row, 7)
+    ins.assert_called_once_with("local", "assets/images/x.png", "first_beat", 9)
+    upd.assert_called_once_with(7, "image_generated")
+    assert result["pipeline_step"] == 9
+    assert 8 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s8_generate_image_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.generate_first_beat_image") as gen,
+        patch("app.graph.insert_image") as ins,
+    ):
+        result = s8_generate_image({})
+
+    gen.assert_not_called()
+    ins.assert_not_called()
+    assert result["pipeline_step"] == 9
+    assert 8 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s8_generate_image_skips_when_no_image_prompt():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", return_value=[]),  # ни scenario, ни image_prompt
+        patch("app.graph.generate_first_beat_image") as gen,
+        patch("app.graph.insert_image") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s8_generate_image({})
+
+    gen.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 9
+    assert 8 in result["executed_steps"]
+
+
+# --- stub factory s9..s13 ---
 
 
 @pytest.mark.unit
 def test_make_stub_prints_and_advances(capsys):
-    stub = _make_stub(8)
+    stub = _make_stub(9)
     with patch("app.graph.fetch_idea_by_status", return_value={"idea_name": "X", "exists": True}):
         result = stub({})
 
-    assert result["pipeline_step"] == 9
-    assert 8 in result["executed_steps"]
-    assert "STATE 8" in capsys.readouterr().out
+    assert result["pipeline_step"] == 10
+    assert 9 in result["executed_steps"]
+    assert "STATE 9" in capsys.readouterr().out

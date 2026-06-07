@@ -1,7 +1,79 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+@pytest.mark.unit
+def test_resolve_output_path_keeps_absolute():
+    from app.services.comfyui import resolve_output_path
+
+    assert resolve_output_path("/abs/x.png", "wf.json", "assets/images") == "/abs/x.png"
+
+
+@pytest.mark.unit
+def test_resolve_output_path_puts_relative_under_images_dir():
+    from app.services.comfyui import resolve_output_path
+
+    result = resolve_output_path("x.png", "wf.json", "assets/images")
+
+    assert result == str(Path("assets/images") / "x.png")
+
+
+@pytest.mark.unit
+def test_resolve_output_path_default_name_from_workflow_stem():
+    from app.services.comfyui import resolve_output_path
+
+    result = resolve_output_path(None, "comfyui_workflows/portrait_001.json", "assets/images")
+
+    assert result.startswith(str(Path("assets/images")))
+    assert "portrait_001" in result
+    assert result.endswith(".png")
+
+
+@pytest.mark.unit
+def test_build_prompt_text_joins_fields_in_order():
+    from app.db import IMAGE_PROMPT_FIELDS
+    from app.services.comfyui import build_prompt_text
+
+    image_prompt = {f: f"v_{f}" for f in IMAGE_PROMPT_FIELDS}
+    image_prompt["id"] = 9  # лишние ключи строки БД игнорируются
+    image_prompt["scenario"] = 3
+
+    result = build_prompt_text(image_prompt)
+
+    assert result == ", ".join(f"v_{f}" for f in IMAGE_PROMPT_FIELDS)
+
+
+@pytest.mark.unit
+def test_build_prompt_text_skips_empty_fields():
+    from app.services.comfyui import build_prompt_text
+
+    result = build_prompt_text(
+        {"image_prompt": "a fox", "camera_angle": "", "lighting": None, "mood": "calm"}
+    )
+
+    assert result == "a fox, calm"
+
+
+@pytest.mark.unit
+def test_generate_first_beat_image_delegates_to_generate_image():
+    from app.config import COMFYUI_IMAGE_PROMPT_NODE, COMFYUI_IMAGE_WORKFLOW, IMAGES_DIR
+    from app.services.comfyui import build_prompt_text, generate_first_beat_image
+
+    image_prompt = {"image_prompt": "a fox", "mood": "calm"}
+    with patch("app.services.comfyui.generate_image", return_value="assets/images/x.png") as gen:
+        result = generate_first_beat_image(image_prompt, 7)
+
+    assert result == "assets/images/x.png"
+    args, kwargs = gen.call_args
+    called = list(args) + list(kwargs.values())
+    assert COMFYUI_IMAGE_WORKFLOW in called
+    assert COMFYUI_IMAGE_PROMPT_NODE in called
+    assert build_prompt_text(image_prompt) in called
+    output_path = next(a for a in called if str(a).endswith(".png") and "idea-7" in str(a))
+    assert output_path.startswith(str(Path(IMAGES_DIR)))
 
 
 def _write_workflow(tmp_path):

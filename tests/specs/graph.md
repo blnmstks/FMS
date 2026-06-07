@@ -142,13 +142,45 @@
 - идеи нет: `pipeline_step == 8`, `7 in executed_steps`; `interrupt` и `generate_image_prompt`
   не вызваны
 
-## Стабы шагов 8–13 — фабрика `_make_stub(n)`
+## `s8_generate_image(state) -> dict`
+Шаг 8: по идее со статусом `image_prompt_finished` генерирует реальное изображение первого
+бита через ComfyUI по сохранённому image-prompt, регистрирует картинку в таблице `images` и
+переводит идею в `image_generated`. Узел самодостаточен (не доверяет state), полностью
+автоматический (без `interrupt`). Статус меняется ТОЛЬКО после успешной генерации и записи —
+при ошибке `generate_first_beat_image`/`insert_image` исключение пробрасывается, статус и
+курсор не двигаются.
+
+Поток:
+- `idea = fetch_idea_by_status("image_prompt_finished")`; если `not idea["exists"]` —
+  защитный `_advance(state, 8)` без работы;
+- `scenario_row = (fetch_rows("scenarios","idea", idea_id) or [{}])[0]`;
+  `scenario_id = scenario_row.get("id")`;
+- `image_prompt_row = (fetch_rows("image_prompts","scenario", scenario_id) or [{}])[0]` если
+  `scenario_id`, иначе `{}`; `image_prompt_id = image_prompt_row.get("id")`;
+- если `image_prompt_id is None` — `_advance(state, 8, {idea_id, idea_name})` без генерации;
+- `path = generate_first_beat_image(image_prompt_row, idea_id)` (сервис ComfyUI);
+- `insert_image("local", path, "first_beat", image_prompt_id)`;
+- `update_idea_status(idea_id, "image_generated")` (строго после записи);
+- `_advance(state, 8, {idea_id, idea_name})`.
+
+После шага статус `image_generated` → диспетчер ведёт на шаг 9 (как и «yes»-ветка шага 7).
+
+### Test cases
+- happy path (мок `fetch_idea_by_status`→idea, `fetch_rows`→scenarios `[{"id":3}]` и
+  image_prompts `[{"id":9,...}]`, `generate_first_beat_image`→путь): вызваны
+  `insert_image("local", <path>, "first_beat", 9)` и
+  `update_idea_status(idea_id, "image_generated")`; `pipeline_step == 9`, `8 in executed_steps`
+- идеи нет: `generate_first_beat_image`/`insert_image` не вызваны; `pipeline_step == 9`,
+  `8 in executed_steps`
+- нет image_prompt (scenario/prompt отсутствует): генерация и запись не вызваны; advance
+
+## Стабы шагов 9–13 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(8)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 9`,
-  `8 in executed_steps`; в stdout `STATE 8`
+- `_make_stub(9)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 10`,
+  `9 in executed_steps`; в stdout `STATE 9`
 
 ## Поток графа
 ```

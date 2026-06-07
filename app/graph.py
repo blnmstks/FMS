@@ -14,12 +14,14 @@ from app.db import (
     fetch_rows,
     insert_characters,
     insert_idea,
+    insert_image,
     insert_image_prompt,
     insert_scenario,
     update_idea_status,
     upsert_visual_styles,
 )
 from app.services.branding import analyze_channel
+from app.services.comfyui import generate_first_beat_image
 from app.services.ideas import generate_video_ideas
 from app.services.image_prompts import generate_image_prompt
 from app.services.scenarios import generate_scenario
@@ -364,8 +366,38 @@ def s7_image_prompt(state: ProjectState) -> dict:
     return _advance(state, 7, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s8_generate_image(state: ProjectState) -> dict:
+    # Шаг 8: по idea со статусом image_prompt_finished генерирует реальное изображение первого
+    # бита через ComfyUI по сохранённому image-prompt, регистрирует его в таблице images и
+    # переводит идею в image_generated. Узел самодостаточен, полностью автоматический (без
+    # interrupt). Статус меняется ТОЛЬКО после успешной генерации и записи: при ошибке
+    # generate_first_beat_image/insert_image исключение пробрасывается, статус и курсор не двигаются.
+    idea = fetch_idea_by_status("image_prompt_finished")
+    if not idea.get("exists"):
+        return _advance(state, 8)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_id = scenario_row.get("id")
+    image_prompt_row = (
+        (fetch_rows("image_prompts", "scenario", scenario_id) or [{}])[0] if scenario_id else {}
+    )
+    image_prompt_id = image_prompt_row.get("id")
+    if image_prompt_id is None:
+        return _advance(state, 8, {"idea_id": idea_id, "idea_name": idea_name})
+
+    print(f"\nSTATE 8 — generating first-beat image for idea: {idea_name}")
+    path = generate_first_beat_image(image_prompt_row, idea_id)
+    insert_image("local", path, "first_beat", image_prompt_id)
+    update_idea_status(idea_id, "image_generated")
+    print(f"STATE 8 — image saved and idea marked image_generated: {idea_name}")
+    return _advance(state, 8, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 8..12: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 9..13: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -408,7 +440,8 @@ g.add_node("dispatch", dispatch)
 g.add_node("s5", s5_scenario)
 g.add_node("s6", s6_visual_style)
 g.add_node("s7", s7_image_prompt)
-for _n in range(8, 14):  # шаги 8..13 — заглушки из фабрики
+g.add_node("s8", s8_generate_image)
+for _n in range(9, 14):  # шаги 9..13 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")
