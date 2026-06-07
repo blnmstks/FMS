@@ -15,6 +15,7 @@ from app.graph import (
     s7_image_prompt,
     s8_generate_image,
     s9_audio_prompts,
+    s10_generate_audio,
     select_target_step,
 )
 
@@ -454,15 +455,85 @@ def test_s9_audio_prompts_advances_without_work_when_no_idea():
     assert 9 in result["executed_steps"]
 
 
-# --- stub factory s10..s13 ---
+# --- s10_generate_audio ---
+
+
+def _fetch_rows_for_s10(table, column, value):
+    return {
+        "scenarios": [{"id": 3, "scenario": "SCEN"}],
+        "audio_seg_prompts": [
+            {"seg_id": 11, "speaker": "Narrator", "emotion": "calm", "tts_text": "Hi."},
+            {"seg_id": 12, "speaker": "Host", "emotion": "excited", "tts_text": "Go!"},
+        ],
+    }[table]
+
+
+@pytest.mark.unit
+def test_s10_generate_audio_synthesizes_registers_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s10),
+        patch("app.graph.generate_segment_audio", return_value="assets/audio/x.wav") as gen,
+        patch("app.graph.insert_audio") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s10_generate_audio({})
+
+    assert gen.call_count == 2
+    assert ins.call_count == 2
+    ins.assert_any_call("local", "assets/audio/x.wav", "segment", 11)
+    ins.assert_any_call("local", "assets/audio/x.wav", "segment", 12)
+    upd.assert_called_once_with(7, "audio_generated")
+    assert result["pipeline_step"] == 11
+    assert 10 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s10_generate_audio_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.generate_segment_audio") as gen,
+        patch("app.graph.insert_audio") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s10_generate_audio({})
+
+    gen.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 11
+    assert 10 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s10_generate_audio_skips_when_no_scenario():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", return_value=[]),  # ни сценария, ни сегментов
+        patch("app.graph.generate_segment_audio") as gen,
+        patch("app.graph.insert_audio") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s10_generate_audio({})
+
+    gen.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 11
+    assert 10 in result["executed_steps"]
+
+
+# --- stub factory s11..s13 ---
 
 
 @pytest.mark.unit
 def test_make_stub_prints_and_advances(capsys):
-    stub = _make_stub(10)
+    stub = _make_stub(11)
     with patch("app.graph.fetch_idea_by_status", return_value={"idea_name": "X", "exists": True}):
         result = stub({})
 
-    assert result["pipeline_step"] == 11
-    assert 10 in result["executed_steps"]
-    assert "STATE 10" in capsys.readouterr().out
+    assert result["pipeline_step"] == 12
+    assert 11 in result["executed_steps"]
+    assert "STATE 11" in capsys.readouterr().out

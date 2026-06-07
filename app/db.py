@@ -366,6 +366,41 @@ def replace_audio_prompts(segments: list[dict], beats: list[dict], scenario_id: 
         conn.commit()
 
 
+def migrate_audio_table() -> None:
+    # Идемпотентно создаёт таблицу audio — реестр сгенерированных аудио-сегментов (по образцу
+    # images: storage-agnostic ключ key + маркер бэкенда storage, чтобы переезд на S3 не требовал
+    # миграции схемы). seg_id — FK на audio_seg_prompts(seg_id); created_at заполняет БД.
+    # Запускать после migrate_audio_seg_prompts_table. Безопасно запускать многократно.
+    # Таблица намеренно НЕ в RELATION_EDGES: PK родителя называется seg_id (не id), а хелперы
+    # fetch_related/fetch_row_by_id завязаны на id — читать через fetch_rows("audio","seg_id",...).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS audio (
+                    id SERIAL PRIMARY KEY,
+                    storage TEXT NOT NULL DEFAULT 'local',
+                    key TEXT NOT NULL,
+                    role TEXT,
+                    seg_id INTEGER REFERENCES audio_seg_prompts(seg_id),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+        conn.commit()
+
+
+def insert_audio(storage: str, key: str, role: str, seg_id: int) -> None:
+    # Регистрирует сгенерированный аудио-сегмент, связывая его с audio_seg_prompts. Каждый вызов —
+    # новая строка. Колонка created_at не передаётся — её заполняет БД (DEFAULT now()). Аргументы
+    # явные, без дефолтов: знание storage=local/role=segment — бизнес-логика узла, а не слоя БД.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO audio (storage, key, role, seg_id) VALUES (%s, %s, %s, %s)",
+                (storage, key, role, seg_id),
+            )
+        conn.commit()
+
+
 def fetch_channel_info() -> dict:
     # Читает базовую информацию канала (name, description, avatar, banner).
     # Возвращает полный dict с channel_info_complete=True, или {channel_info_complete: False} если строки нет или есть пустые поля.

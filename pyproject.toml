@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv",
     "openai>=1.0",
     "requests",
+    "google-genai>=2.0",
 ]
 
 [project.optional-dependencies]

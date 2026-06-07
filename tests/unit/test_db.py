@@ -1075,3 +1075,76 @@ def test_replace_audio_prompts_empty_lists_only_delete(mock_psycopg_connect):
     assert sum("DELETE FROM audio_seg_prompts" in c for c in calls) == 1
     assert sum("INSERT INTO" in c for c in calls) == 0
     mock_conn.commit.assert_called_once()
+
+
+# --- migrate_audio_table ---
+
+
+@pytest.mark.unit
+def test_migrate_audio_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_table
+
+    migrate_audio_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS audio" in c for c in calls)
+    assert any("REFERENCES audio_seg_prompts(seg_id)" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_audio_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_table
+
+    migrate_audio_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS audio" in str(c)
+    )
+    for col in ("storage", "key", "role", "seg_id", "created_at"):
+        assert col in create_call
+
+
+# --- insert_audio ---
+
+
+@pytest.mark.unit
+def test_insert_audio_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_audio
+
+    insert_audio("local", "idea-7-seg-11-ts.wav", "segment", 11)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO audio" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_audio_passes_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_audio
+
+    insert_audio("local", "idea-7-seg-11-ts.wav", "segment", 11)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO audio" in str(c)
+    )
+    assert insert_call.args[1] == ("local", "idea-7-seg-11-ts.wav", "segment", 11)
+    assert insert_call.args[1][-1] == 11
+
+
+@pytest.mark.unit
+def test_relation_edges_excludes_audio():
+    # audio намеренно не в RELATION_EDGES: родитель audio_seg_prompts имеет PK seg_id, не id.
+    from app.db import RELATION_EDGES
+
+    assert not any(edge[0] == "audio" for edge in RELATION_EDGES)

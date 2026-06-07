@@ -465,3 +465,46 @@ def test_replace_audio_prompts_round_trip_and_replaces(pg_container, monkeypatch
         ).fetchone()[0]
     assert seg_count == 1
     assert speaker == "Solo"
+
+
+@pytest.mark.integration
+def test_insert_audio_links_to_segment_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+    db.migrate_audio_table()
+
+    db.insert_idea("Idea for audio", "audio_prompts_finished")
+    idea_id = db.fetch_idea_by_status("audio_prompts_finished")["idea_id"]
+    db.insert_scenario("A scenario for audio.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+        seg_id = conn.execute(
+            "INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING seg_id",
+            ("Narrator", "calm", "Hello world.", [1], scenario_id),
+        ).fetchone()[0]
+        conn.commit()
+
+    key = f"idea-{idea_id}-seg-{seg_id}-ts.wav"
+    db.insert_audio("local", key, "segment", seg_id)
+
+    with psycopg.connect(pg_container) as conn:
+        row = conn.execute(
+            "SELECT storage, key, role, seg_id FROM audio WHERE seg_id = %s",
+            (seg_id,),
+        ).fetchone()
+    assert row == ("local", key, "segment", seg_id)

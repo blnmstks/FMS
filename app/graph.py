@@ -12,6 +12,7 @@ from app.db import (
     fetch_present_idea_statuses,
     fetch_raw_idea,
     fetch_rows,
+    insert_audio,
     insert_characters,
     insert_idea,
     insert_image,
@@ -22,6 +23,7 @@ from app.db import (
     upsert_visual_styles,
 )
 from app.services.audio_prompts import generate_audio_prompts
+from app.services.audio_tts import generate_segment_audio
 from app.services.branding import analyze_channel
 from app.services.comfyui import generate_first_beat_image
 from app.services.ideas import generate_video_ideas
@@ -440,8 +442,36 @@ def s9_audio_prompts(state: ProjectState) -> dict:
     return _advance(state, 9, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s10_generate_audio(state: ProjectState) -> dict:
+    # Шаг 10: по idea со статусом audio_prompts_finished синтезирует речь по строкам
+    # audio_seg_prompts через Google Gemini TTS, сохраняет WAV в AUDIO_DIR, регистрирует каждый
+    # сегмент в таблице audio и переводит идею в audio_generated. Узел самодостаточен, полностью
+    # автоматический (без interrupt). Статус меняется ТОЛЬКО после успешной генерации и записи
+    # всех сегментов: при ошибке generate_segment_audio/insert_audio исключение пробрасывается,
+    # статус и курсор не двигаются.
+    idea = fetch_idea_by_status("audio_prompts_finished")
+    if not idea.get("exists"):
+        return _advance(state, 10)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_id = scenario_row.get("id")
+    segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id) if scenario_id else []
+
+    if scenario_id is not None:
+        print(f"\nSTATE 10 — synthesizing {len(segments)} audio segment(s) for idea: {idea_name}")
+        for seg in segments:
+            path = generate_segment_audio(seg, idea_id)
+            insert_audio("local", path, "segment", seg["seg_id"])
+        update_idea_status(idea_id, "audio_generated")
+        print(f"STATE 10 — audio saved and idea marked audio_generated: {idea_name}")
+    return _advance(state, 10, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 10..13: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 11..13: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -486,7 +516,8 @@ g.add_node("s6", s6_visual_style)
 g.add_node("s7", s7_image_prompt)
 g.add_node("s8", s8_generate_image)
 g.add_node("s9", s9_audio_prompts)
-for _n in range(10, 14):  # шаги 10..13 — заглушки из фабрики
+g.add_node("s10", s10_generate_audio)
+for _n in range(11, 14):  # шаги 11..13 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")

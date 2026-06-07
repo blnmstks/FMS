@@ -211,13 +211,45 @@
   advance
 - идеи нет: `pipeline_step == 10`, `9 in executed_steps`; `interrupt`/`generate_audio_prompts` не вызваны
 
-## Стабы шагов 10–13 — фабрика `_make_stub(n)`
+## `s10_generate_audio(state) -> dict`
+Шаг 10: по идее со статусом `audio_prompts_finished` синтезирует речь по строкам
+`audio_seg_prompts` через Google Gemini TTS (`services.audio_tts.generate_segment_audio`),
+сохраняет WAV в `AUDIO_DIR`, регистрирует каждый сегмент в таблице `audio` (`insert_audio`) и
+переводит идею в `audio_generated`. Узел самодостаточен (не доверяет state), полностью
+автоматический (без `interrupt`). Статус меняется ТОЛЬКО после успешной генерации и записи всех
+сегментов — при ошибке `generate_segment_audio`/`insert_audio` исключение пробрасывается, статус
+и курсор не двигаются.
+
+Поток:
+- `idea = fetch_idea_by_status("audio_prompts_finished")`; если `not idea["exists"]` —
+  защитный `_advance(state, 10)` без работы;
+- `scenario_row = (fetch_rows("scenarios","idea", idea_id) or [{}])[0]`;
+  `scenario_id = scenario_row.get("id")`;
+- `segments = fetch_rows("audio_seg_prompts","scenario", scenario_id)` если `scenario_id`, иначе `[]`;
+- если `scenario_id is not None`: для каждого `seg` —
+  `path = generate_segment_audio(seg, idea_id)`, `insert_audio("local", path, "segment", seg["seg_id"])`;
+  затем `update_idea_status(idea_id, "audio_generated")` (строго после записей);
+- `_advance(state, 10, {idea_id, idea_name})`.
+
+После шага статус `audio_generated` → диспетчер ведёт на шаг 11.
+
+### Test cases
+- happy path (мок `fetch_idea_by_status`→idea, `fetch_rows`→scenarios `[{"id":3}]` и
+  audio_seg_prompts `[{"seg_id":11,...},{"seg_id":12,...}]`, `generate_segment_audio`→путь):
+  `generate_segment_audio` вызван на каждый сегмент, `insert_audio("local", <path>, "segment",
+  seg_id)` на каждый; вызван `update_idea_status(idea_id, "audio_generated")`; `pipeline_step == 11`,
+  `10 in executed_steps`
+- идеи нет: `generate_segment_audio`/`insert_audio`/`update_idea_status` не вызваны;
+  `pipeline_step == 11`, `10 in executed_steps`
+- нет сценария (`fetch_rows`→`[]`): генерация/запись/смена статуса не вызваны; advance
+
+## Стабы шагов 11–13 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(10)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 11`,
-  `10 in executed_steps`; в stdout `STATE 10`
+- `_make_stub(11)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 12`,
+  `11 in executed_steps`; в stdout `STATE 11`
 
 ## Поток графа
 ```

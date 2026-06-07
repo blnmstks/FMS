@@ -749,3 +749,70 @@ CREATE TABLE IF NOT EXISTS audio_beat_prompts (
 - **commit один раз**: `conn.commit()` вызывается ровно один раз
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 
+---
+
+## `migrate_audio_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `audio` — реестр **сгенерированных** аудио-сегментов (по образцу
+`images`: storage-agnostic ключ `key` + маркер бэкенда `storage`, чтобы переезд на S3 не требовал
+миграции схемы). Запускать **после** `migrate_audio_seg_prompts_table` (FK `seg_id` ссылается на
+`audio_seg_prompts(seg_id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS audio (
+    id SERIAL PRIMARY KEY,
+    storage TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
+    role TEXT,
+    seg_id INTEGER REFERENCES audio_seg_prompts(seg_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+- `storage` — бэкенд (`local` / в будущем `s3`); DEFAULT — страховка на уровне схемы.
+- `key` — относительный ключ файла (напр. `idea-7-seg-11-20260607-120000.wav`).
+- `role` — назначение записи; пока единственное значение `segment`.
+- `created_at` — заполняется БД (DEFAULT `now()`).
+
+Всегда вызывает `conn.commit()`.
+
+**Примечание:** таблица намеренно НЕ входит в `RELATION_EDGES` — родитель `audio_seg_prompts`
+имеет PK с именем `seg_id` (не `id`), а хелперы `fetch_related`/`fetch_row_by_id` завязаны на
+PK `id`. Для чтения использовать `fetch_rows("audio", "seg_id", seg_id)`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Колонки: `id`, `storage`, `key`, `role`, `seg_id`, `created_at`.
+3. Колонка `seg_id` — FK на `audio_seg_prompts(seg_id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS audio`
+- **FK на audio_seg_prompts**: SQL содержит `REFERENCES audio_seg_prompts(seg_id)`
+- **колонки**: SQL содержит `storage`, `key`, `role`, `seg_id`, `created_at`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `insert_audio(storage: str, key: str, role: str, seg_id: int) -> None`
+
+### Contract
+Регистрирует сгенерированный аудио-сегмент, связывая его с `audio_seg_prompts`:
+`INSERT INTO audio (storage, key, role, seg_id) VALUES (%s,%s,%s,%s)`. Значения:
+`(storage, key, role, seg_id)`. Колонка `created_at` не передаётся — её заполняет БД
+(DEFAULT `now()`). Всегда `conn.commit()`.
+
+Все аргументы явные, без дефолтов: знание «storage=local, role=segment» — бизнес-логика
+сервиса/узла, а не слоя БД.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Всегда `INSERT` (без проверки существования) — каждый сегмент новая строка.
+3. Параметры в порядке `(storage, key, role, seg_id)`; последний — `seg_id`.
+
+### Test cases
+- **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO audio`
+- **параметры**: параметры INSERT == `(storage, key, role, seg_id)`, последний — `seg_id`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
