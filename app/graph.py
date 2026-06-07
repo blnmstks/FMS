@@ -17,9 +17,11 @@ from app.db import (
     insert_image,
     insert_image_prompt,
     insert_scenario,
+    replace_audio_prompts,
     update_idea_status,
     upsert_visual_styles,
 )
+from app.services.audio_prompts import generate_audio_prompts
 from app.services.branding import analyze_channel
 from app.services.comfyui import generate_first_beat_image
 from app.services.ideas import generate_video_ideas
@@ -396,8 +398,50 @@ def s8_generate_image(state: ProjectState) -> dict:
     return _advance(state, 8, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s9_audio_prompts(state: ProjectState) -> dict:
+    # Шаг 9: по идее со статусом image_generated генерирует через ИИ промпты аудио-сегментов
+    # (для TTS) и их битов для сценария, сохраняет их в audio_seg_prompts + audio_beat_prompts
+    # (заменяя прежние), переводит идею в audio_prompts_finished. Узел самодостаточен.
+    # Если промпты для сценария уже есть — предлагает перейти к следующему шагу или
+    # перегенерировать; если их нет — генерирует сразу (без вопроса). Статус меняется ТОЛЬКО
+    # после успешной записи: при ошибке исключение пробрасывается, статус и курсор не двигаются.
+    idea = fetch_idea_by_status("image_generated")
+    if not idea.get("exists"):
+        return _advance(state, 9)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_text = scenario_row.get("scenario", "")
+    scenario_id = scenario_row.get("id")
+
+    existing = fetch_rows("audio_seg_prompts", "scenario", scenario_id) if scenario_id else []
+    if existing:
+        choice = interrupt(
+            f"STATE 9 — Found {len(existing)} existing audio-segment prompt(s) for this scenario.\n"
+            f"[1] Continue to next step  [2] Generate new\nChoose (1/2):"
+        )
+        if choice.strip() == "1":
+            update_idea_status(idea_id, "audio_prompts_finished")
+            return _advance(state, 9, {"idea_id": idea_id, "idea_name": idea_name})
+
+    print(f"\nSTATE 9 — generating audio-segment prompts for idea: {idea_name}")
+    result = generate_audio_prompts(scenario_text)
+
+    if scenario_id is not None:
+        replace_audio_prompts(
+            result.get("audio_segments") or [],
+            result.get("beats") or [],
+            scenario_id,
+        )
+        update_idea_status(idea_id, "audio_prompts_finished")
+        print(f"STATE 9 — audio prompts saved and idea marked audio_prompts_finished: {idea_name}")
+    return _advance(state, 9, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 9..13: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 10..13: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -441,7 +485,8 @@ g.add_node("s5", s5_scenario)
 g.add_node("s6", s6_visual_style)
 g.add_node("s7", s7_image_prompt)
 g.add_node("s8", s8_generate_image)
-for _n in range(9, 14):  # шаги 9..13 — заглушки из фабрики
+g.add_node("s9", s9_audio_prompts)
+for _n in range(10, 14):  # шаги 10..13 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")

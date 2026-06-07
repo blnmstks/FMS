@@ -152,7 +152,7 @@ SQL, который выполняется:
 2. Для каждого значения из `IDEAS_STATUSES`: `ALTER TYPE idea_status ADD VALUE IF NOT EXISTS '<value>'` — добавляет недостающие значения в уже существующий тип.
 3. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
 
-`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `av_prompts_finished`, `audio_generated`, `clips_generated`, `video_done`.
+`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `audio_prompts_finished`, `audio_generated`, `clips_generated`, `video_done`.
 
 Всегда вызывает `conn.commit()`.
 
@@ -709,5 +709,43 @@ CREATE TABLE IF NOT EXISTS audio_beat_prompts (
 - **PK id**: SQL содержит `id SERIAL PRIMARY KEY`
 - **FK на audio_seg_prompts**: SQL содержит `REFERENCES audio_seg_prompts(seg_id)`
 - **колонки**: SQL содержит `id`, `seg_id`, `audio_text`
+
+---
+
+## `replace_audio_prompts(segments: list[dict], beats: list[dict], scenario_id: int) -> None`
+
+### Contract
+Идемпотентно пересоздаёт промпты аудио-сегментов и их битов для одного сценария (шаг 9).
+Формат `segments`/`beats` — из ответа LLM:
+- `segments[]`: `{seg_id (локальный), speaker, emotion, tts_text, beat_ids: [int]}`
+- `beats[]`: `{id (локальный), seg_id (локальный или null), audio_text}`
+
+Порядок в одной транзакции:
+1. `DELETE FROM audio_beat_prompts WHERE seg_id IN (SELECT seg_id FROM audio_seg_prompts WHERE scenario=%s)`
+   — биты удаляются первыми (FK на сегменты).
+2. `DELETE FROM audio_seg_prompts WHERE scenario=%s`.
+3. На каждый сегмент: `INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario)
+   VALUES (...) RETURNING seg_id` — локальный `seg_id` → БД-serial `seg_id` (карта `seg_id_map`).
+   `beat_ids` пишется как Python-list в `INTEGER[]`.
+4. На каждый бит: `INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s)` — `seg_id`
+   берётся из карты по локальному `beat.seg_id`; силентный бит (`seg_id is None`) → `NULL`,
+   `audio_text` по умолчанию `""`.
+
+Один `conn.commit()` на всю операцию (атомарность: при ошибке — откат, прежние данные целы).
+
+### Invariants
+1. Сначала удаляются биты, затем сегменты (порядок из-за FK), затем вставка.
+2. Локальный `seg_id` сегмента маппится на БД-serial через `RETURNING`; биты ссылаются на
+   замапленный seg_id.
+3. Силентный бит (`seg_id=None`) пишется с `NULL`.
+4. Ровно один `conn.commit()`.
+5. Пустые списки → только удаление (очистка промптов сценария).
+
+### Test cases
+- **порядок delete**: один `DELETE FROM audio_beat_prompts`, один `DELETE FROM audio_seg_prompts`
+- **insert сегментов с RETURNING**: на каждый сегмент `INSERT INTO audio_seg_prompts` … `RETURNING seg_id`
+- **маппинг seg_id у битов**: при `fetchone.side_effect=[(101,),(102,)]` бит с локальным `seg_id=1`
+  вставляется с `seg_id=101`, бит с локальным `seg_id=2` — с `102`; силентный (`seg_id=None`) — с `None`
+- **commit один раз**: `conn.commit()` вызывается ровно один раз
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 

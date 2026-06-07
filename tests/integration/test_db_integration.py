@@ -315,8 +315,8 @@ def test_migrate_audio_seg_prompts_table_round_trip(pg_container, monkeypatch):
     db.migrate_scenarios_table()
     db.migrate_audio_seg_prompts_table()
 
-    db.insert_idea("Idea for audio seg", "av_prompts_finished")
-    idea_id = db.fetch_idea_by_status("av_prompts_finished")["idea_id"]
+    db.insert_idea("Idea for audio seg", "audio_prompts_finished")
+    idea_id = db.fetch_idea_by_status("audio_prompts_finished")["idea_id"]
     db.insert_scenario("A scenario for audio.", idea_id)
 
     with psycopg.connect(pg_container) as conn:
@@ -357,8 +357,8 @@ def test_migrate_audio_beat_prompts_table_round_trip(pg_container, monkeypatch):
     db.migrate_audio_seg_prompts_table()
     db.migrate_audio_beat_prompts_table()
 
-    db.insert_idea("Idea for audio beat", "av_prompts_finished")
-    idea_id = db.fetch_idea_by_status("av_prompts_finished")["idea_id"]
+    db.insert_idea("Idea for audio beat", "audio_prompts_finished")
+    idea_id = db.fetch_idea_by_status("audio_prompts_finished")["idea_id"]
     db.insert_scenario("A scenario for audio.", idea_id)
 
     with psycopg.connect(pg_container) as conn:
@@ -384,3 +384,84 @@ def test_migrate_audio_beat_prompts_table_round_trip(pg_container, monkeypatch):
             (seg_id,),
         ).fetchone()
     assert row == (seg_id, "First beat line.")
+
+
+@pytest.mark.integration
+def test_replace_audio_prompts_round_trip_and_replaces(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+    db.migrate_audio_beat_prompts_table()
+
+    db.insert_idea("Idea for replace", "image_generated")
+    idea_id = db.fetch_idea_by_status("image_generated")["idea_id"]
+    db.insert_scenario("A scenario for replace.", idea_id)
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+
+    segments = [
+        {"seg_id": 1, "speaker": "Narrator", "emotion": "calm", "tts_text": "Hi.", "beat_ids": [1]},
+        {
+            "seg_id": 2,
+            "speaker": "Host",
+            "emotion": "excited",
+            "tts_text": "Go!",
+            "beat_ids": [2, 3],
+        },
+    ]
+    beats = [
+        {"id": 1, "seg_id": 1, "audio_text": "Hi."},
+        {"id": 2, "seg_id": 2, "audio_text": "Go!"},
+        {"id": 3, "seg_id": None, "audio_text": ""},
+    ]
+    db.replace_audio_prompts(segments, beats, scenario_id)
+
+    with psycopg.connect(pg_container) as conn:
+        seg_rows = conn.execute(
+            "SELECT seg_id, speaker, beat_ids FROM audio_seg_prompts WHERE scenario = %s "
+            "ORDER BY seg_id",
+            (scenario_id,),
+        ).fetchall()
+        beat_rows = conn.execute(
+            "SELECT b.seg_id, b.audio_text FROM audio_beat_prompts b "
+            "JOIN audio_seg_prompts s ON s.scenario = %s "
+            "WHERE b.seg_id = s.seg_id OR b.seg_id IS NULL "
+            "ORDER BY b.id",
+            (scenario_id,),
+        ).fetchall()
+
+    assert [r[1] for r in seg_rows] == ["Narrator", "Host"]
+    assert [r[2] for r in seg_rows] == [[1], [2, 3]]
+    db_seg_ids = {r[0] for r in seg_rows}
+    # биты ссылаются на реальные seg_id своих сегментов; силентный бит — NULL
+    assert beat_rows[0][0] in db_seg_ids
+    assert beat_rows[1][0] in db_seg_ids
+    assert beat_rows[2] == (None, "")
+
+    # повторный вызов заменяет прежние строки (не накапливает)
+    db.replace_audio_prompts(
+        [{"seg_id": 1, "speaker": "Solo", "emotion": "flat", "tts_text": "Once.", "beat_ids": [1]}],
+        [{"id": 1, "seg_id": 1, "audio_text": "Once."}],
+        scenario_id,
+    )
+    with psycopg.connect(pg_container) as conn:
+        seg_count = conn.execute(
+            "SELECT count(*) FROM audio_seg_prompts WHERE scenario = %s", (scenario_id,)
+        ).fetchone()[0]
+        speaker = conn.execute(
+            "SELECT speaker FROM audio_seg_prompts WHERE scenario = %s", (scenario_id,)
+        ).fetchone()[0]
+    assert seg_count == 1
+    assert speaker == "Solo"

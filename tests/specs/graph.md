@@ -3,7 +3,7 @@
 Начиная с шага 5, маршрут определяется статусами идей в таблице `ideas`. Соответствие
 статус → шаг линейное (из `IDEAS_STATUSES`): `raw_idea→5`, `scenario_finished→6`,
 `clips_visual_style_finished→7`, `image_prompt_finished→8`, `image_generated→9`,
-`av_prompts_finished→10`, `audio_generated→11`, `clips_generated→12`, `video_done→13`.
+`audio_prompts_finished→10`, `audio_generated→11`, `clips_generated→12`, `video_done→13`.
 
 ## `STEP_BY_STATUS`
 Словарь `{status: 5 + index}` из `IDEAS_STATUSES` (единственный источник истины — порядок
@@ -174,13 +174,50 @@
   `8 in executed_steps`
 - нет image_prompt (scenario/prompt отсутствует): генерация и запись не вызваны; advance
 
-## Стабы шагов 9–13 — фабрика `_make_stub(n)`
+## `s9_audio_prompts(state) -> dict`
+Шаг 9: по идее со статусом `image_generated` генерирует через ИИ промпты **аудио-сегментов**
+(для TTS) и их **битов** для сценария, сохраняет их в `audio_seg_prompts` + `audio_beat_prompts`
+(заменяя прежние, `replace_audio_prompts`), переводит идею в `audio_prompts_finished`. Узел
+самодостаточен (не доверяет state).
+
+Поток:
+- `idea = fetch_idea_by_status("image_generated")`; если `not idea["exists"]` — защитный
+  `_advance(state, 9)` без работы (и без `interrupt`);
+- `scenario_row = (fetch_rows("scenarios","idea", idea_id) or [{}])[0]`;
+  `scenario_text = scenario_row.get("scenario","")`, `scenario_id = scenario_row.get("id")`;
+- `existing = fetch_rows("audio_seg_prompts","scenario", scenario_id)` если `scenario_id`, иначе `[]`;
+- **если `existing` непусто** → `interrupt("STATE 9 — Found N existing … [1] Continue to next step
+  [2] Generate new\nChoose (1/2):")`:
+  - `choice.strip() == "1"` → `update_idea_status(idea_id, "audio_prompts_finished")`,
+    `_advance(state, 9, {idea_id, idea_name})` (на шаг 10) — генерации/записи нет;
+  - иначе («2») → проваливается в генерацию;
+- **генерация** (нет `existing` ИЛИ выбран «2»): `result = generate_audio_prompts(scenario_text)`;
+  если `scenario_id is not None`: `replace_audio_prompts(result.get("audio_segments") or [],
+  result.get("beats") or [], scenario_id)`, затем `update_idea_status(idea_id,
+  "audio_prompts_finished")` (статус — строго ПОСЛЕ записи);
+- `_advance(state, 9, {idea_id, idea_name})`.
+
+`interrupt` — только при наличии `existing` и ПОСЛЕ guard'а (read-операции идемпотентны при resume).
+
+### Test cases
+- existing + «1» (мок `fetch_idea_by_status`→idea, `fetch_rows`→scenario `[{"id":3}]` и
+  audio_seg_prompts `[{...}]`, `interrupt`→"1"): `generate_audio_prompts`/`replace_audio_prompts`
+  НЕ вызваны; вызван `update_idea_status(idea_id, "audio_prompts_finished")`; `pipeline_step == 10`,
+  `9 in executed_steps`
+- existing + «2»: вызваны `generate_audio_prompts("SCEN")`,
+  `replace_audio_prompts(segments, beats, 3)`, `update_idea_status(idea_id,
+  "audio_prompts_finished")`; `pipeline_step == 10`, `9 in executed_steps`
+- нет existing (audio_seg_prompts `[]`): `interrupt` НЕ вызван; вызваны generate+replace+update;
+  advance
+- идеи нет: `pipeline_step == 10`, `9 in executed_steps`; `interrupt`/`generate_audio_prompts` не вызваны
+
+## Стабы шагов 10–13 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(9)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 10`,
-  `9 in executed_steps`; в stdout `STATE 9`
+- `_make_stub(10)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 11`,
+  `10 in executed_steps`; в stdout `STATE 10`
 
 ## Поток графа
 ```

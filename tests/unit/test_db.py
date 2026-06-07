@@ -991,3 +991,87 @@ def test_relation_edges_includes_audio_seg_prompts():
     from app.db import RELATION_EDGES
 
     assert ("audio_seg_prompts", "scenario", "scenarios") in RELATION_EDGES
+
+
+# --- replace_audio_prompts ---
+
+
+def _sample_segments():
+    return [
+        {"seg_id": 1, "speaker": "Narrator", "emotion": "calm", "tts_text": "Hi.", "beat_ids": [1]},
+        {"seg_id": 2, "speaker": "Host", "emotion": "excited", "tts_text": "Go!", "beat_ids": [2]},
+    ]
+
+
+def _sample_beats():
+    return [
+        {"id": 1, "seg_id": 1, "audio_text": "Hi."},
+        {"id": 2, "seg_id": 2, "audio_text": "Go!"},
+        {"id": 3, "seg_id": None, "audio_text": ""},
+    ]
+
+
+@pytest.mark.unit
+def test_replace_audio_prompts_deletes_beats_then_segments(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.side_effect = [(101,), (102,)]
+
+    from app.db import replace_audio_prompts
+
+    replace_audio_prompts(_sample_segments(), _sample_beats(), 7)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert sum("DELETE FROM audio_beat_prompts" in c for c in calls) == 1
+    assert sum("DELETE FROM audio_seg_prompts" in c for c in calls) == 1
+    assert sum("INSERT INTO audio_seg_prompts" in c for c in calls) == 2
+    assert sum("INSERT INTO audio_beat_prompts" in c for c in calls) == 3
+    assert all("RETURNING seg_id" in c for c in calls if "INSERT INTO audio_seg_prompts" in c)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_replace_audio_prompts_maps_local_seg_id_to_db_serial(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.side_effect = [(101,), (102,)]
+
+    from app.db import replace_audio_prompts
+
+    replace_audio_prompts(_sample_segments(), _sample_beats(), 7)
+
+    beat_inserts = [
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO audio_beat_prompts" in str(c)
+    ]
+    assert beat_inserts[0].args[1] == (101, "Hi.")
+    assert beat_inserts[1].args[1] == (102, "Go!")
+    assert beat_inserts[2].args[1] == (None, "")
+
+
+@pytest.mark.unit
+def test_replace_audio_prompts_segment_insert_passes_beat_ids_list(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+    mock_cursor.fetchone.side_effect = [(101,), (102,)]
+
+    from app.db import replace_audio_prompts
+
+    replace_audio_prompts(_sample_segments(), _sample_beats(), 7)
+
+    seg_inserts = [
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO audio_seg_prompts" in str(c)
+    ]
+    assert seg_inserts[0].args[1] == ("Narrator", "calm", "Hi.", [1], 7)
+    assert seg_inserts[1].args[1] == ("Host", "excited", "Go!", [2], 7)
+
+
+@pytest.mark.unit
+def test_replace_audio_prompts_empty_lists_only_delete(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import replace_audio_prompts
+
+    replace_audio_prompts([], [], 7)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert sum("DELETE FROM audio_beat_prompts" in c for c in calls) == 1
+    assert sum("DELETE FROM audio_seg_prompts" in c for c in calls) == 1
+    assert sum("INSERT INTO" in c for c in calls) == 0
+    mock_conn.commit.assert_called_once()

@@ -13,7 +13,7 @@ IDEAS_STATUSES = [
     "clips_visual_style_finished",
     "image_prompt_finished",
     "image_generated",
-    "av_prompts_finished",
+    "audio_prompts_finished",
     "audio_generated",
     "clips_generated",
     "video_done",
@@ -322,6 +322,47 @@ def migrate_audio_beat_prompts_table() -> None:
                     audio_text TEXT
                 )
             """)
+        conn.commit()
+
+
+def replace_audio_prompts(segments: list[dict], beats: list[dict], scenario_id: int) -> None:
+    # Идемпотентно пересоздаёт промпты аудио-сегментов и их битов для сценария: сначала удаляет
+    # биты (FK), затем сегменты этого сценария, затем вставляет новые. Локальный seg_id из ответа
+    # LLM мапится на БД-serial seg_id через RETURNING, чтобы FK битов был корректным. Силентный
+    # бит (seg_id=null) пишется с NULL. Один коммит на всю операцию (атомарность).
+    # Формат segments/beats — из ответа LLM (audio_segments / beats).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM audio_beat_prompts WHERE seg_id IN "
+                "(SELECT seg_id FROM audio_seg_prompts WHERE scenario=%s)",
+                (scenario_id,),
+            )
+            cur.execute("DELETE FROM audio_seg_prompts WHERE scenario=%s", (scenario_id,))
+            seg_id_map: dict = {}
+            for seg in segments:
+                cur.execute(
+                    "INSERT INTO audio_seg_prompts "
+                    "(speaker, emotion, tts_text, beat_ids, scenario) "
+                    "VALUES (%s, %s, %s, %s, %s) RETURNING seg_id",
+                    (
+                        seg.get("speaker"),
+                        seg.get("emotion"),
+                        seg.get("tts_text"),
+                        seg.get("beat_ids"),
+                        scenario_id,
+                    ),
+                )
+                seg_id_map[seg.get("seg_id")] = cur.fetchone()[0]
+            for beat in beats:
+                local = beat.get("seg_id")
+                cur.execute(
+                    "INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s)",
+                    (
+                        seg_id_map.get(local) if local is not None else None,
+                        beat.get("audio_text", ""),
+                    ),
+                )
         conn.commit()
 
 
