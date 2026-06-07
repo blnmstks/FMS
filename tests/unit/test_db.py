@@ -671,7 +671,7 @@ def test_fetch_related_collects_children_for_parent_source(mock_psycopg_connect)
 def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
     _, _, mock_cursor = mock_psycopg_connect
     # scenarios — источник-потомок (ребро scenarios→ideas) и одновременно родитель для
-    # characters_sheet и image_prompts (рёбра ...→scenarios).
+    # characters_sheet, image_prompts и audio_seg_prompts (рёбра ...→scenarios).
     # fetch_row_by_id: сценарий с idea=7, затем строка идеи; fetch_rows(children) → [].
     mock_cursor.description = [("id",), ("scenario",), ("idea",)]
     mock_cursor.fetchone.side_effect = [(5, "text", 7), (7, "name", "raw_idea")]
@@ -683,7 +683,11 @@ def test_fetch_related_collects_parent_for_child_source(mock_psycopg_connect):
 
     assert result["source"]["idea"] == 7
     assert result["parents"]["ideas"]["id"] == 7
-    assert result["children"] == {"characters_sheet": [], "image_prompts": []}
+    assert result["children"] == {
+        "characters_sheet": [],
+        "image_prompts": [],
+        "audio_seg_prompts": [],
+    }
 
 
 # --- migrate_characters_sheet_table ---
@@ -901,6 +905,77 @@ def test_insert_image_passes_params(mock_psycopg_connect):
     assert insert_call.args[1][-1] == 3
 
 
+# --- migrate_audio_seg_prompts_table ---
+
+
+@pytest.mark.unit
+def test_migrate_audio_seg_prompts_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_seg_prompts_table
+
+    migrate_audio_seg_prompts_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS audio_seg_prompts" in c for c in calls)
+    assert any("seg_id SERIAL PRIMARY KEY" in c for c in calls)
+    assert any("beat_ids INTEGER[]" in c for c in calls)
+    assert any("REFERENCES scenarios" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_audio_seg_prompts_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_seg_prompts_table
+
+    migrate_audio_seg_prompts_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS audio_seg_prompts" in str(c)
+    )
+    for col in ("seg_id", "speaker", "emotion", "tts_text", "beat_ids", "scenario"):
+        assert col in create_call
+
+
+# --- migrate_audio_beat_prompts_table ---
+
+
+@pytest.mark.unit
+def test_migrate_audio_beat_prompts_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_beat_prompts_table
+
+    migrate_audio_beat_prompts_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS audio_beat_prompts" in c for c in calls)
+    assert any("id SERIAL PRIMARY KEY" in c for c in calls)
+    assert any("REFERENCES audio_seg_prompts(seg_id)" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_audio_beat_prompts_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_beat_prompts_table
+
+    migrate_audio_beat_prompts_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS audio_beat_prompts" in str(c)
+    )
+    for col in ("id", "seg_id", "audio_text"):
+        assert col in create_call
+
+
 # --- RELATION_EDGES ---
 
 
@@ -909,3 +984,10 @@ def test_relation_edges_includes_images():
     from app.db import RELATION_EDGES
 
     assert ("images", "image_prompt", "image_prompts") in RELATION_EDGES
+
+
+@pytest.mark.unit
+def test_relation_edges_includes_audio_seg_prompts():
+    from app.db import RELATION_EDGES
+
+    assert ("audio_seg_prompts", "scenario", "scenarios") in RELATION_EDGES

@@ -297,3 +297,90 @@ def test_insert_image_links_to_image_prompt_round_trip(pg_container, monkeypatch
             (image_prompt_id,),
         ).fetchone()
     assert row == ("local", key, "generated", image_prompt_id)
+
+
+@pytest.mark.integration
+def test_migrate_audio_seg_prompts_table_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+
+    db.insert_idea("Idea for audio seg", "av_prompts_finished")
+    idea_id = db.fetch_idea_by_status("av_prompts_finished")["idea_id"]
+    db.insert_scenario("A scenario for audio.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+
+        conn.execute(
+            "INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            ("Narrator", "calm", "Hello world.", [1, 2, 3], scenario_id),
+        )
+        conn.commit()
+
+    with psycopg.connect(pg_container) as conn:
+        row = conn.execute(
+            "SELECT speaker, emotion, tts_text, beat_ids, scenario "
+            "FROM audio_seg_prompts WHERE scenario = %s",
+            (scenario_id,),
+        ).fetchone()
+    assert row == ("Narrator", "calm", "Hello world.", [1, 2, 3], scenario_id)
+
+
+@pytest.mark.integration
+def test_migrate_audio_beat_prompts_table_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+    db.migrate_audio_beat_prompts_table()
+
+    db.insert_idea("Idea for audio beat", "av_prompts_finished")
+    idea_id = db.fetch_idea_by_status("av_prompts_finished")["idea_id"]
+    db.insert_scenario("A scenario for audio.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+
+        seg_id = conn.execute(
+            "INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING seg_id",
+            ("Narrator", "calm", "Hello world.", [1, 2], scenario_id),
+        ).fetchone()[0]
+
+        conn.execute(
+            "INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s)",
+            (seg_id, "First beat line."),
+        )
+        conn.commit()
+
+    with psycopg.connect(pg_container) as conn:
+        row = conn.execute(
+            "SELECT seg_id, audio_text FROM audio_beat_prompts WHERE seg_id = %s",
+            (seg_id,),
+        ).fetchone()
+    assert row == (seg_id, "First beat line.")

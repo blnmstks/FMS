@@ -4,6 +4,8 @@ from langgraph.types import Command
 from app.config import DB_URL, THREAD_ID
 from app.db import (
     fetch_channel_info,
+    migrate_audio_beat_prompts_table,
+    migrate_audio_seg_prompts_table,
     migrate_channel_info_style,
     migrate_channel_info_table,
     migrate_characters_sheet_table,
@@ -29,6 +31,8 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
     migrate_visual_styles_table()
     migrate_image_prompts_table()
     migrate_images_table()
+    migrate_audio_seg_prompts_table()
+    migrate_audio_beat_prompts_table()
     app = build_app(checkpointer)
 
     initial_state = fetch_channel_info()

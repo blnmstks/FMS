@@ -313,6 +313,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
 - `("characters_sheet", "scenario", "scenarios")`
 - `("image_prompts", "scenario", "scenarios")`
 - `("images", "image_prompt", "image_prompts")`
+- `("audio_seg_prompts", "scenario", "scenarios")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -623,5 +624,90 @@ CREATE TABLE IF NOT EXISTS images (
 - **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO images`
 - **параметры**: параметры INSERT == `(storage, key, role, image_prompt_id)`, последний —
   `image_prompt_id`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `migrate_audio_seg_prompts_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `audio_seg_prompts` — аудио-сегменты для TTS, привязанные к
+сценарию (что произносится, кем, с какой эмоцией и к каким битам сценария относится сегмент).
+Запускать **после** `migrate_scenarios_table` (FK `scenario` ссылается на `scenarios(id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS audio_seg_prompts (
+    seg_id SERIAL PRIMARY KEY,
+    speaker VARCHAR,
+    emotion TEXT,
+    tts_text TEXT,
+    beat_ids INTEGER[],
+    scenario INTEGER REFERENCES scenarios(id)
+)
+```
+- `seg_id` — первичный ключ `SERIAL` (та же семантика, что `id` в остальных таблицах, только
+  имя другое).
+- `speaker` — кто говорит (`VARCHAR`).
+- `emotion` — эмоциональная окраска реплики (`TEXT`).
+- `tts_text` — текст, который озвучивается (`TEXT`).
+- `beat_ids` — массив целых (`INTEGER[]`): к каким битам сценария относится сегмент.
+- `scenario` — FK на `scenarios(id)`.
+
+Всегда вызывает `conn.commit()`.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. `seg_id` — `SERIAL PRIMARY KEY`.
+3. `beat_ids` — `INTEGER[]`.
+4. Колонка `scenario` — внешний ключ на `scenarios(id)`.
+5. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS audio_seg_prompts`
+- **PK seg_id**: SQL содержит `seg_id SERIAL PRIMARY KEY`
+- **массив битов**: SQL содержит `beat_ids INTEGER[]`
+- **FK на scenarios**: SQL содержит `REFERENCES scenarios`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `migrate_audio_beat_prompts_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `audio_beat_prompts` — биты озвучки сегмента (текст каждого бита
+и ссылка на аудио-сегмент). Запускать **после** `migrate_audio_seg_prompts_table` (FK `seg_id`
+ссылается на `audio_seg_prompts(seg_id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS audio_beat_prompts (
+    id SERIAL PRIMARY KEY,
+    seg_id INTEGER REFERENCES audio_seg_prompts(seg_id),
+    audio_text TEXT
+)
+```
+- `id` — первичный ключ `SERIAL`.
+- `seg_id` — FK на `audio_seg_prompts(seg_id)`. Ключ родителя называется `seg_id` (не `id`),
+  поэтому ссылка указывает колонку явно.
+- `audio_text` — текст бита озвучки (`TEXT`).
+
+Всегда вызывает `conn.commit()`.
+
+**Примечание:** таблица намеренно НЕ входит в `RELATION_EDGES` — реестр и хелперы
+`fetch_related`/`fetch_row_by_id` завязаны на PK с именем `id`, а у родителя `audio_seg_prompts`
+ключ называется `seg_id`. Обобщение хелперов под произвольное имя PK — отдельная задача.
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. `id` — `SERIAL PRIMARY KEY`.
+3. Колонка `seg_id` — внешний ключ на `audio_seg_prompts(seg_id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS audio_beat_prompts`
+- **PK id**: SQL содержит `id SERIAL PRIMARY KEY`
+- **FK на audio_seg_prompts**: SQL содержит `REFERENCES audio_seg_prompts(seg_id)`
+- **колонки**: SQL содержит `id`, `seg_id`, `audio_text`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 

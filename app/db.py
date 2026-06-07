@@ -67,6 +67,7 @@ RELATION_EDGES = [
     ("characters_sheet", "scenario", "scenarios"),
     ("image_prompts", "scenario", "scenarios"),
     ("images", "image_prompt", "image_prompts"),
+    ("audio_seg_prompts", "scenario", "scenarios"),
 ]
 
 
@@ -286,6 +287,41 @@ def insert_image(storage: str, key: str, role: str, image_prompt_id: int) -> Non
                 "INSERT INTO images (storage, key, role, image_prompt) VALUES (%s, %s, %s, %s)",
                 (storage, key, role, image_prompt_id),
             )
+        conn.commit()
+
+
+def migrate_audio_seg_prompts_table() -> None:
+    # Идемпотентно создаёт таблицу audio_seg_prompts (аудио-сегменты для TTS, привязка к сценарию).
+    # seg_id — SERIAL PK (та же семантика, что id в остальных таблицах). beat_ids — массив INTEGER[].
+    # scenario — FK на scenarios(id). Запускать после миграции scenarios. Безопасно запускать многократно.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS audio_seg_prompts (
+                    seg_id SERIAL PRIMARY KEY,
+                    speaker VARCHAR,
+                    emotion TEXT,
+                    tts_text TEXT,
+                    beat_ids INTEGER[],
+                    scenario INTEGER REFERENCES scenarios(id)
+                )
+            """)
+        conn.commit()
+
+
+def migrate_audio_beat_prompts_table() -> None:
+    # Идемпотентно создаёт таблицу audio_beat_prompts (биты озвучки сегмента). id — SERIAL PK.
+    # seg_id — FK на audio_seg_prompts(seg_id) (PK родителя называется seg_id, не id).
+    # Запускать после миграции audio_seg_prompts. Безопасно запускать многократно.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS audio_beat_prompts (
+                    id SERIAL PRIMARY KEY,
+                    seg_id INTEGER REFERENCES audio_seg_prompts(seg_id),
+                    audio_text TEXT
+                )
+            """)
         conn.commit()
 
 
