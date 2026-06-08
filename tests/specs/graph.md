@@ -3,7 +3,7 @@
 Начиная с шага 5, маршрут определяется статусами идей в таблице `ideas`. Соответствие
 статус → шаг линейное (из `IDEAS_STATUSES`): `raw_idea→5`, `scenario_finished→6`,
 `clips_visual_style_finished→7`, `image_prompt_finished→8`, `image_generated→9`,
-`audio_prompts_finished→10`, `audio_generated→11`, `clips_generated→12`, `video_done→13`.
+`audio_prompts_finished→10`, `audio_generated→11`, `audio_beats_generated→12`, `video_done→13`.
 
 ## `STEP_BY_STATUS`
 Словарь `{status: 5 + index}` из `IDEAS_STATUSES` (единственный источник истины — порядок
@@ -251,13 +251,52 @@
   `pipeline_step == 11`, `10 in executed_steps`
 - нет сценария (`fetch_rows`→`[]`): генерация/запись/смена статуса не вызваны; advance
 
-## Стабы шагов 11–13 — фабрика `_make_stub(n)`
+## `s11_generate_beats(state) -> dict`
+Шаг 11: по идее со статусом `audio_generated` нарезает каждый синтезированный аудио-сегмент на
+биты (forced alignment через `services.audio_beats.slice_segment_beats` → `aeneas`), сохраняет
+по-битовые WAV в `AUDIO_DIR/beats`, регистрирует их в таблице `audio_beats` (`insert_audio_beat`,
+с реальной `duration`) и переводит идею в `audio_beats_generated`. Узел самодостаточен, полностью
+автоматический (без `interrupt`). Статус меняется ТОЛЬКО после успешной нарезки и записи — при
+ошибке `slice_segment_beats`/`insert_audio_beat` исключение пробрасывается, статус и курсор не двигаются.
+
+Поток:
+- `idea = fetch_idea_by_status("audio_generated")`; если `not idea["exists"]` — защитный
+  `_advance(state, 11)` без работы;
+- `scenario_id` из `fetch_rows("scenarios","idea", idea_id)`; `segments =
+  fetch_rows("audio_seg_prompts","scenario", scenario_id)` (иначе `[]`);
+- если `scenario_id is not None`: для каждого `seg` (`seg_id = seg["seg_id"]`):
+  - `audio_rows = fetch_rows("audio","seg_id", seg_id)`; если пусто — сегмент не озвучен, пропуск;
+  - `beats = sorted(fetch_rows("audio_beat_prompts","seg_id", seg_id), key=id)`,
+    `voiced = [b for b in beats if b["audio_text"].strip()]`; если пусто — силент-сегмент, пропуск;
+  - **посегментная идемпотентность**: `already = [bool(fetch_rows("audio_beats","beat", b["id"]))
+    for b in voiced]`; если `all(already)` — сегмент уже нарезан, `skipped += 1`, пропуск; если
+    `any(already)` — частично, `delete_audio_beats_for_beats([b["id"] ...])` перед перенарезкой;
+  - `manifest = slice_segment_beats(audio_rows[0]["key"], voiced, idea_id, seg_id)`; на каждый
+    элемент `insert_audio_beat("local", item["path"], "beat", item["duration"], item["beat_id"])`;
+  - затем `update_idea_status(idea_id, "audio_beats_generated")` (строго после записей);
+- `_advance(state, 11, {idea_id, idea_name})`.
+
+После шага статус `audio_beats_generated` → диспетчер ведёт на шаг 12.
+
+### Test cases
+- happy path (мок: scenarios `[{"id":3}]`, audio_seg_prompts `[{"seg_id":11},{"seg_id":12}]`,
+  audio→`[{"key":...}]`, audio_beat_prompts→биты, audio_beats→`[]`, `slice_segment_beats`→манифест):
+  `slice_segment_beats` вызван на сегмент, `insert_audio_beat` на каждый бит манифеста; вызван
+  `update_idea_status(idea_id, "audio_beats_generated")`; `pipeline_step == 12`, `11 in executed_steps`
+- посегментный пропуск (audio_beats непусто для всех битов сегмента): `slice_segment_beats`/
+  `insert_audio_beat` не вызваны для него; статус всё равно метится
+- частичная перенарезка (часть битов сегмента уже в audio_beats): вызван
+  `delete_audio_beats_for_beats([...])`, затем нарезка и вставка
+- идеи нет: `slice_segment_beats`/`insert_audio_beat`/`update_idea_status` не вызваны; advance до 12
+- нет сценария (`fetch_rows`→`[]`): нарезка/запись/смена статуса не вызваны; advance
+
+## Стабы шагов 12–13 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(11)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 12`,
-  `11 in executed_steps`; в stdout `STATE 11`
+- `_make_stub(12)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 13`,
+  `12 in executed_steps`; в stdout `STATE 12`
 
 ## Поток графа
 ```

@@ -14,6 +14,11 @@ dependencies = [
     "openai>=1.0",
     "requests",
     "google-genai>=2.0",
+    "pydub",
+    "aeneas",
+    # aeneas использует свой bundled wavfile-ридер (numpy.fromstring, удалён в numpy 2.0) и собран
+    # под C-ABI numpy 1.x — поэтому numpy фиксируем на 1.x.
+    "numpy<2",
 ]
 
 [project.optional-dependencies]

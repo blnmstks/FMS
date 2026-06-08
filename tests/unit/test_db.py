@@ -1148,3 +1148,124 @@ def test_relation_edges_excludes_audio():
     from app.db import RELATION_EDGES
 
     assert not any(edge[0] == "audio" for edge in RELATION_EDGES)
+
+
+# --- IDEAS_STATUSES: шаг 11 ---
+
+
+@pytest.mark.unit
+def test_ideas_statuses_has_audio_beats_generated():
+    assert "audio_beats_generated" in IDEAS_STATUSES
+
+
+@pytest.mark.unit
+def test_ideas_statuses_audio_beats_replaces_clips_generated():
+    # audio_beats_generated заняло позицию между audio_generated и video_done.
+    i = IDEAS_STATUSES.index("audio_beats_generated")
+    assert IDEAS_STATUSES[i - 1] == "audio_generated"
+    assert IDEAS_STATUSES[i + 1] == "video_done"
+
+
+# --- migrate_audio_beats_table ---
+
+
+@pytest.mark.unit
+def test_migrate_audio_beats_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_beats_table
+
+    migrate_audio_beats_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS audio_beats" in c for c in calls)
+    assert any("REFERENCES audio_beat_prompts(id)" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_audio_beats_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_audio_beats_table
+
+    migrate_audio_beats_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS audio_beats" in str(c)
+    )
+    for col in ("storage", "key", "role", "duration", "beat", "created_at"):
+        assert col in create_call
+
+
+# --- insert_audio_beat ---
+
+
+@pytest.mark.unit
+def test_insert_audio_beat_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_audio_beat
+
+    insert_audio_beat("local", "beats/idea-7-seg-11-beat-3-ts.wav", "beat", 1.234, 3)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO audio_beats" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_audio_beat_passes_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_audio_beat
+
+    insert_audio_beat("local", "beats/idea-7-seg-11-beat-3-ts.wav", "beat", 1.234, 3)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO audio_beats" in str(c)
+    )
+    assert insert_call.args[1] == ("local", "beats/idea-7-seg-11-beat-3-ts.wav", "beat", 1.234, 3)
+    assert insert_call.args[1][-1] == 3
+
+
+# --- delete_audio_beats_for_beats ---
+
+
+@pytest.mark.unit
+def test_delete_audio_beats_for_beats_executes_delete_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import delete_audio_beats_for_beats
+
+    delete_audio_beats_for_beats([1, 2, 3])
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("DELETE FROM audio_beats" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_delete_audio_beats_for_beats_passes_beat_ids_as_param(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import delete_audio_beats_for_beats
+
+    delete_audio_beats_for_beats([1, 2, 3])
+
+    delete_call = next(
+        c for c in mock_cursor.execute.call_args_list if "DELETE FROM audio_beats" in str(c)
+    )
+    assert delete_call.args[1] == ([1, 2, 3],)
+
+
+# --- RELATION_EDGES: audio_beats ---
+
+
+@pytest.mark.unit
+def test_relation_edges_includes_audio_beats():
+    from app.db import RELATION_EDGES
+
+    assert ("audio_beats", "beat", "audio_beat_prompts") in RELATION_EDGES

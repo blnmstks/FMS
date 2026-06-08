@@ -47,3 +47,57 @@ def test_write_wav_respects_custom_params(tmp_path):
     with wave.open(str(out), "rb") as wf:
         assert wf.getframerate() == 48000
         assert wf.getnchannels() == 2
+
+
+def _one_second_wav(path) -> str:
+    # 24000 кадров при 24000 Hz, mono, 16-bit → ровно ~1000 мс.
+    from app.utils.audio import write_wav
+
+    return write_wav(b"\x00\x00" * 24000, str(path))
+
+
+# --- wav_duration_ms ---
+
+
+@pytest.mark.unit
+def test_wav_duration_ms_returns_length(tmp_path):
+    from app.utils.audio import wav_duration_ms
+
+    src = _one_second_wav(tmp_path / "src.wav")
+    assert abs(wav_duration_ms(src) - 1000) <= 10
+
+
+# --- slice_wav ---
+
+
+@pytest.mark.unit
+def test_slice_wav_cuts_fragment(tmp_path):
+    from app.utils.audio import slice_wav, wav_duration_ms
+
+    src = _one_second_wav(tmp_path / "src.wav")
+    dst = tmp_path / "clip.wav"
+    slice_wav(src, str(dst), 200, 700)
+
+    assert dst.exists()
+    assert abs(wav_duration_ms(str(dst)) - 500) <= 20
+
+
+@pytest.mark.unit
+def test_slice_wav_creates_nested_dirs(tmp_path):
+    from app.utils.audio import slice_wav
+
+    src = _one_second_wav(tmp_path / "src.wav")
+    dst = tmp_path / "beats" / "x.wav"
+    slice_wav(src, str(dst), 0, 100)
+
+    assert dst.exists()
+
+
+@pytest.mark.unit
+def test_slice_wav_returns_path(tmp_path):
+    from app.utils.audio import slice_wav
+
+    src = _one_second_wav(tmp_path / "src.wav")
+    dst = tmp_path / "clip.wav"
+
+    assert slice_wav(src, str(dst), 0, 100) == str(dst)

@@ -16,6 +16,7 @@ from app.graph import (
     s8_generate_image,
     s9_audio_prompts,
     s10_generate_audio,
+    s11_generate_beats,
     select_target_step,
 )
 
@@ -590,15 +591,158 @@ def test_s10_generate_audio_skips_when_no_scenario():
     assert 10 in result["executed_steps"]
 
 
-# --- stub factory s11..s13 ---
+# --- s11_generate_beats ---
+
+
+_S11_SEGMENTS = [{"seg_id": 11}, {"seg_id": 12}]
+_S11_BEATS = {
+    11: [{"id": 101, "audio_text": "A"}, {"id": 102, "audio_text": "B"}],
+    12: [{"id": 103, "audio_text": "C"}],
+}
+_S11_AUDIO = {11: [{"key": "assets/audio/seg-11.wav"}], 12: [{"key": "assets/audio/seg-12.wav"}]}
+
+
+def _slice_segment_beats(seg_audio_path, voiced, idea_id, seg_id):
+    return [
+        {"beat_id": b["id"], "path": f"assets/audio/beats/{b['id']}.wav", "duration": 1.0}
+        for b in voiced
+    ]
+
+
+def _fetch_rows_for_s11(audio_beats_for):
+    # audio_beats_for(beat_id) -> список существующих строк audio_beats для бита (для идемпотентности).
+    def fetch_rows(table, column, value):
+        if table == "scenarios":
+            return [{"id": 3, "scenario": "SCEN"}]
+        if table == "audio_seg_prompts":
+            return _S11_SEGMENTS
+        if table == "audio":
+            return _S11_AUDIO[value]
+        if table == "audio_beat_prompts":
+            return _S11_BEATS[value]
+        if table == "audio_beats":
+            return audio_beats_for(value)
+        return []
+
+    return fetch_rows
+
+
+@pytest.mark.unit
+def test_s11_generate_beats_slices_registers_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s11(lambda v: [])),
+        patch("app.graph.slice_segment_beats", side_effect=_slice_segment_beats) as sl,
+        patch("app.graph.insert_audio_beat") as ins,
+        patch("app.graph.delete_audio_beats_for_beats") as dele,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s11_generate_beats({})
+
+    assert sl.call_count == 2  # по сегменту
+    assert ins.call_count == 3  # 2 бита seg-11 + 1 бит seg-12
+    ins.assert_any_call("local", "assets/audio/beats/101.wav", "beat", 1.0, 101)
+    ins.assert_any_call("local", "assets/audio/beats/103.wav", "beat", 1.0, 103)
+    dele.assert_not_called()
+    upd.assert_called_once_with(7, "audio_beats_generated")
+    assert result["pipeline_step"] == 12
+    assert 11 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s11_generate_beats_skips_segment_already_sliced():
+    # У всех битов уже есть строки в audio_beats — оба сегмента пропускаются, статус всё равно метится.
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s11(lambda v: [{"id": 1}])),
+        patch("app.graph.slice_segment_beats") as sl,
+        patch("app.graph.insert_audio_beat") as ins,
+        patch("app.graph.delete_audio_beats_for_beats") as dele,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s11_generate_beats({})
+
+    sl.assert_not_called()
+    ins.assert_not_called()
+    dele.assert_not_called()
+    upd.assert_called_once_with(7, "audio_beats_generated")
+    assert result["pipeline_step"] == 12
+    assert 11 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s11_generate_beats_partial_segment_deletes_then_reslices():
+    # seg-11: бит 101 уже нарезан, 102 — нет → частичная перенарезка с предварительным удалением.
+    # seg-12: бит 103 не нарезан → обычная нарезка.
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+
+    def audio_beats_for(beat_id):
+        return [{"id": 1}] if beat_id == 101 else []
+
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s11(audio_beats_for)),
+        patch("app.graph.slice_segment_beats", side_effect=_slice_segment_beats) as sl,
+        patch("app.graph.insert_audio_beat") as ins,
+        patch("app.graph.delete_audio_beats_for_beats") as dele,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s11_generate_beats({})
+
+    dele.assert_called_once_with([101, 102])
+    assert sl.call_count == 2
+    assert ins.call_count == 3
+    upd.assert_called_once_with(7, "audio_beats_generated")
+    assert result["pipeline_step"] == 12
+
+
+@pytest.mark.unit
+def test_s11_generate_beats_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.slice_segment_beats") as sl,
+        patch("app.graph.insert_audio_beat") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s11_generate_beats({})
+
+    sl.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 12
+    assert 11 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s11_generate_beats_skips_when_no_scenario():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", return_value=[]),  # ни сценария, ни сегментов
+        patch("app.graph.slice_segment_beats") as sl,
+        patch("app.graph.insert_audio_beat") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s11_generate_beats({})
+
+    sl.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 12
+    assert 11 in result["executed_steps"]
+
+
+# --- stub factory s12..s13 ---
 
 
 @pytest.mark.unit
 def test_make_stub_prints_and_advances(capsys):
-    stub = _make_stub(11)
+    stub = _make_stub(12)
     with patch("app.graph.fetch_idea_by_status", return_value={"idea_name": "X", "exists": True}):
         result = stub({})
 
-    assert result["pipeline_step"] == 12
-    assert 11 in result["executed_steps"]
-    assert "STATE 11" in capsys.readouterr().out
+    assert result["pipeline_step"] == 13
+    assert 12 in result["executed_steps"]
+    assert "STATE 12" in capsys.readouterr().out

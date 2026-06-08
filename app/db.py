@@ -15,7 +15,7 @@ IDEAS_STATUSES = [
     "image_generated",
     "audio_prompts_finished",
     "audio_generated",
-    "clips_generated",
+    "audio_beats_generated",
     "video_done",
 ]
 
@@ -68,6 +68,7 @@ RELATION_EDGES = [
     ("image_prompts", "scenario", "scenarios"),
     ("images", "image_prompt", "image_prompts"),
     ("audio_seg_prompts", "scenario", "scenarios"),
+    ("audio_beats", "beat", "audio_beat_prompts"),
 ]
 
 
@@ -398,6 +399,52 @@ def insert_audio(storage: str, key: str, role: str, seg_id: int) -> None:
                 "INSERT INTO audio (storage, key, role, seg_id) VALUES (%s, %s, %s, %s)",
                 (storage, key, role, seg_id),
             )
+        conn.commit()
+
+
+def migrate_audio_beats_table() -> None:
+    # Идемпотентно создаёт таблицу audio_beats — реестр нарезанных аудиобитов (шаг 11), по образцу
+    # audio/images: storage-agnostic ключ key + маркер бэкенда storage. Дополнительно хранит duration
+    # (реальная длина бита в секундах — уходит в видео-пайплайн). beat — FK на audio_beat_prompts(id);
+    # created_at заполняет БД. Запускать после migrate_audio_beat_prompts_table. Безопасно многократно.
+    # В отличие от audio, таблица входит в RELATION_EDGES: родитель audio_beat_prompts имеет PK id.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS audio_beats (
+                    id SERIAL PRIMARY KEY,
+                    storage TEXT NOT NULL DEFAULT 'local',
+                    key TEXT NOT NULL,
+                    role TEXT,
+                    duration DOUBLE PRECISION,
+                    beat INTEGER REFERENCES audio_beat_prompts(id),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+        conn.commit()
+
+
+def insert_audio_beat(storage: str, key: str, role: str, duration: float, beat_id: int) -> None:
+    # Регистрирует нарезанный аудиобит, связывая его с audio_beat_prompts. Каждый вызов — новая
+    # строка. Колонка created_at не передаётся — её заполняет БД (DEFAULT now()). Аргументы явные,
+    # без дефолтов: знание storage=local/role=beat — бизнес-логика узла, а не слоя БД.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO audio_beats (storage, key, role, duration, beat) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (storage, key, role, duration, beat_id),
+            )
+        conn.commit()
+
+
+def delete_audio_beats_for_beats(beat_ids: list[int]) -> None:
+    # Удаляет строки audio_beats для переданных битов: DELETE ... WHERE beat = ANY(%s). Нужна для
+    # чистого повторного прохода частично нарезанного сегмента (идемпотентность без дублей).
+    # Пустой список — корректный no-op (= ANY('{}') не совпадает ни с чем).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM audio_beats WHERE beat = ANY(%s)", (beat_ids,))
         conn.commit()
 
 

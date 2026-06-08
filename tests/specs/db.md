@@ -152,7 +152,13 @@ SQL, который выполняется:
 2. Для каждого значения из `IDEAS_STATUSES`: `ALTER TYPE idea_status ADD VALUE IF NOT EXISTS '<value>'` — добавляет недостающие значения в уже существующий тип.
 3. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
 
-`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `audio_prompts_finished`, `audio_generated`, `clips_generated`, `video_done`.
+`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `audio_prompts_finished`, `audio_generated`, `audio_beats_generated`, `video_done`.
+
+**Примечание:** значение `audio_beats_generated` (шаг 11 — нарезка сегментов на биты) заняло позицию
+прежнего `clips_generated`. `migrate_ideas_table` лишь добавляет новые значения в enum
+(`ADD VALUE IF NOT EXISTS`) — старое `clips_generated` остаётся в типе `idea_status` неиспользуемым
+(Postgres не удаляет значения enum), на логику не влияет: маппинг шаг↔статус завязан на порядок
+Python-списка `IDEAS_STATUSES`, а не на внутренний порядок enum.
 
 Всегда вызывает `conn.commit()`.
 
@@ -314,6 +320,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
 - `("image_prompts", "scenario", "scenarios")`
 - `("images", "image_prompt", "image_prompts")`
 - `("audio_seg_prompts", "scenario", "scenarios")`
+- `("audio_beats", "beat", "audio_beat_prompts")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -814,5 +821,91 @@ PK `id`. Для чтения использовать `fetch_rows("audio", "seg_
 ### Test cases
 - **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO audio`
 - **параметры**: параметры INSERT == `(storage, key, role, seg_id)`, последний — `seg_id`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `migrate_audio_beats_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `audio_beats` — реестр **нарезанных** аудиобитов (шаг 11), по образцу
+`audio`/`images`: storage-agnostic ключ `key` + маркер бэкенда `storage`. Дополнительно хранит
+`duration` — реальную длину бита в секундах (уходит в видео-пайплайн). Запускать **после**
+`migrate_audio_beat_prompts_table` (FK `beat` ссылается на `audio_beat_prompts(id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS audio_beats (
+    id SERIAL PRIMARY KEY,
+    storage TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
+    role TEXT,
+    duration DOUBLE PRECISION,
+    beat INTEGER REFERENCES audio_beat_prompts(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+- `key` — относительный ключ файла (напр. `beats/idea-7-seg-11-beat-3-20260607-120000.wav`).
+- `role` — назначение записи; пока единственное значение `beat`.
+- `duration` — реальная длительность бита в секундах (округлённая).
+- `created_at` — заполняется БД (DEFAULT `now()`).
+
+Всегда вызывает `conn.commit()`.
+
+**Примечание:** в отличие от `audio`, таблица входит в `RELATION_EDGES`
+(`("audio_beats", "beat", "audio_beat_prompts")`) — родитель `audio_beat_prompts` имеет PK `id`,
+поэтому `fetch_related`/`fetch_row_by_id` работают корректно (как для пары `images` ↔ `image_prompts`).
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Колонки: `id`, `storage`, `key`, `role`, `duration`, `beat`, `created_at`.
+3. Колонка `beat` — FK на `audio_beat_prompts(id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS audio_beats`
+- **FK на audio_beat_prompts**: SQL содержит `REFERENCES audio_beat_prompts(id)`
+- **колонки**: SQL содержит `storage`, `key`, `role`, `duration`, `beat`, `created_at`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `insert_audio_beat(storage: str, key: str, role: str, duration: float, beat_id: int) -> None`
+
+### Contract
+Регистрирует нарезанный аудиобит, связывая его с `audio_beat_prompts`:
+`INSERT INTO audio_beats (storage, key, role, duration, beat) VALUES (%s,%s,%s,%s,%s)`. Значения:
+`(storage, key, role, duration, beat_id)`. Колонка `created_at` не передаётся — её заполняет БД
+(DEFAULT `now()`). Всегда `conn.commit()`.
+
+Все аргументы явные, без дефолтов: знание «storage=local, role=beat» — бизнес-логика узла, не слоя БД.
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. Всегда `INSERT` (без проверки существования) — каждый бит новая строка.
+3. Параметры в порядке `(storage, key, role, duration, beat_id)`; последний — `beat_id`.
+
+### Test cases
+- **insert вызван**: `cur.execute` вызывается с SQL содержащим `INSERT INTO audio_beats`
+- **параметры**: параметры INSERT == `(storage, key, role, duration, beat_id)`, последний — `beat_id`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `delete_audio_beats_for_beats(beat_ids: list[int]) -> None`
+
+### Contract
+Удаляет строки `audio_beats`, относящиеся к переданным битам:
+`DELETE FROM audio_beats WHERE beat = ANY(%s)` с параметром `(beat_ids,)`. Нужна для чистого
+повторного прохода частично нарезанного сегмента (идемпотентность без дублей). Всегда `conn.commit()`.
+Пустой список `beat_ids` — корректный no-op на уровне SQL (`= ANY('{}')` не совпадает ни с чем).
+
+### Invariants
+1. Всегда вызывает `conn.commit()`.
+2. SQL — `DELETE FROM audio_beats WHERE beat = ANY(%s)`, параметр `(beat_ids,)`.
+
+### Test cases
+- **delete вызван**: `cur.execute` вызывается с SQL содержащим `DELETE FROM audio_beats`
+- **параметр**: параметр == `([1, 2, 3],)`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
 

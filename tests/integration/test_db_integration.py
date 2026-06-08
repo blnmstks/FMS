@@ -508,3 +508,59 @@ def test_insert_audio_links_to_segment_round_trip(pg_container, monkeypatch):
             (seg_id,),
         ).fetchone()
     assert row == ("local", key, "segment", seg_id)
+
+
+@pytest.mark.integration
+def test_insert_and_delete_audio_beats_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+    db.migrate_audio_beat_prompts_table()
+    db.migrate_audio_beats_table()
+
+    db.insert_idea("Idea for audio beats", "audio_generated")
+    idea_id = db.fetch_idea_by_status("audio_generated")["idea_id"]
+    db.insert_scenario("A scenario for audio beats.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+        seg_id = conn.execute(
+            "INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING seg_id",
+            ("Narrator", "calm", "Hello world.", [1], scenario_id),
+        ).fetchone()[0]
+        beat_id = conn.execute(
+            "INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s) RETURNING id",
+            (seg_id, "First beat line."),
+        ).fetchone()[0]
+        conn.commit()
+
+    key = f"beats/idea-{idea_id}-seg-{seg_id}-beat-{beat_id}-ts.wav"
+    db.insert_audio_beat("local", key, "beat", 1.234, beat_id)
+
+    with psycopg.connect(pg_container) as conn:
+        row = conn.execute(
+            "SELECT storage, key, role, duration, beat FROM audio_beats WHERE beat = %s",
+            (beat_id,),
+        ).fetchone()
+    assert row == ("local", key, "beat", 1.234, beat_id)
+
+    db.delete_audio_beats_for_beats([beat_id])
+
+    with psycopg.connect(pg_container) as conn:
+        remaining = conn.execute(
+            "SELECT count(*) FROM audio_beats WHERE beat = %s", (beat_id,)
+        ).fetchone()[0]
+    assert remaining == 0

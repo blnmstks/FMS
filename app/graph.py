@@ -6,6 +6,7 @@ from app.db import (
     IDEAS_STATUSES,
     STYLE_FIELDS,
     VISUAL_STYLE_FIELDS,
+    delete_audio_beats_for_beats,
     fetch_channel_info,
     fetch_channel_style_info,
     fetch_idea_by_status,
@@ -13,6 +14,7 @@ from app.db import (
     fetch_raw_idea,
     fetch_rows,
     insert_audio,
+    insert_audio_beat,
     insert_characters,
     insert_idea,
     insert_image,
@@ -22,6 +24,7 @@ from app.db import (
     update_idea_status,
     upsert_visual_styles,
 )
+from app.services.audio_beats import slice_segment_beats
 from app.services.audio_prompts import generate_audio_prompts
 from app.services.audio_tts import generate_segment_audio
 from app.services.branding import analyze_channel
@@ -481,8 +484,64 @@ def s10_generate_audio(state: ProjectState) -> dict:
     return _advance(state, 10, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s11_generate_beats(state: ProjectState) -> dict:
+    # Шаг 11: по idea со статусом audio_generated нарезает каждый синтезированный аудио-сегмент на
+    # биты (forced alignment через aeneas), сохраняет по-битовые WAV в AUDIO_DIR/beats, регистрирует
+    # их в таблице audio_beats (с реальной длительностью) и переводит идею в audio_beats_generated.
+    # Узел самодостаточен, полностью автоматический (без interrupt). Статус меняется ТОЛЬКО после
+    # успешной нарезки и записи: при ошибке slice_segment_beats/insert_audio_beat исключение
+    # пробрасывается, статус и курсор не двигаются.
+    # Посегментная идемпотентность: сегмент, у которого ВСЕ озвученные биты уже в audio_beats,
+    # пропускается; частично нарезанный сегмент перенарезается заново (с удалением прежних строк его
+    # битов) — без дублей и без перегенерации уже готового.
+    idea = fetch_idea_by_status("audio_generated")
+    if not idea.get("exists"):
+        return _advance(state, 11)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_id = scenario_row.get("id")
+    segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id) if scenario_id else []
+
+    if scenario_id is not None:
+        print(
+            f"\nSTATE 11 — slicing audio into beats for idea: {idea_name} "
+            f"({len(segments)} segment(s))"
+        )
+        generated = skipped = 0
+        for seg in segments:
+            seg_id = seg["seg_id"]
+            audio_rows = fetch_rows("audio", "seg_id", seg_id)
+            if not audio_rows:  # сегмент не озвучен — нарезать нечего
+                continue
+            beats = sorted(
+                fetch_rows("audio_beat_prompts", "seg_id", seg_id), key=lambda b: b["id"]
+            )
+            voiced = [b for b in beats if (b.get("audio_text") or "").strip()]
+            if not voiced:  # силент-сегмент без озвученных битов
+                continue
+            already = [bool(fetch_rows("audio_beats", "beat", b["id"])) for b in voiced]
+            if all(already):  # сегмент уже нарезан целиком — пропускаем
+                skipped += 1
+                continue
+            if any(already):  # частично нарезан — чистим перед перенарезкой (без дублей)
+                delete_audio_beats_for_beats([b["id"] for b in voiced])
+            manifest = slice_segment_beats(audio_rows[0]["key"], voiced, idea_id, seg_id)
+            for item in manifest:
+                insert_audio_beat("local", item["path"], "beat", item["duration"], item["beat_id"])
+            generated += 1
+        update_idea_status(idea_id, "audio_beats_generated")
+        print(
+            f"STATE 11 — beats ready, idea marked audio_beats_generated: {idea_name} "
+            f"(sliced {generated}, skipped {skipped} existing)"
+        )
+    return _advance(state, 11, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 11..13: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 12..13: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -528,7 +587,8 @@ g.add_node("s7", s7_image_prompt)
 g.add_node("s8", s8_generate_image)
 g.add_node("s9", s9_audio_prompts)
 g.add_node("s10", s10_generate_audio)
-for _n in range(11, 14):  # шаги 11..13 — заглушки из фабрики
+g.add_node("s11", s11_generate_beats)
+for _n in range(12, 14):  # шаги 12..13 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")

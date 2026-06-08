@@ -2,6 +2,10 @@
 
 Чистые утилиты для аудио-файлов. Без доменных знаний и без вызовов LLM/API.
 
+`write_wav` работает на stdlib `wave`; `wav_duration_ms`/`slice_wav` — на `pydub`
+(как в референсном `slice_segment.py`). `pydub` импортируется на уровне модуля (чистая
+Python-зависимость; для WAV ffmpeg не требует).
+
 ## `write_wav(pcm: bytes, output_path: str, sample_rate: int = 24000, channels: int = 1, sampwidth: int = 2) -> str`
 
 ### Contract
@@ -19,4 +23,32 @@
 - **пишет корректный WAV**: после `write_wav(b"\x00\x01...", tmp/out.wav)` файл существует,
   `wave.open(...).getframerate() == 24000`, `getnchannels() == 1`, `getsampwidth() == 2`
 - **создаёт вложенные папки**: `write_wav(pcm, tmp/"a"/"b"/"x.wav")` создаёт директории и файл
+- **возвращает путь**: результат равен переданному `output_path`
+
+## `wav_duration_ms(path: str) -> float`
+
+### Contract
+Длительность аудиофайла в миллисекундах — `len(AudioSegment.from_file(path))` (pydub).
+
+### Test cases (unit, `tmp_path`)
+- **длительность**: для WAV из 24000 кадров (24000 Hz, mono, 16-bit) `wav_duration_ms(path)`
+  близка к `1000` (±10 мс)
+
+## `slice_wav(input_path: str, output_path: str, start_ms: float, end_ms: float) -> str`
+
+### Contract
+Вырезает фрагмент `[start_ms:end_ms]` из `input_path` и пишет его в `output_path` форматом `wav`
+(`AudioSegment.from_file(...)[start_ms:end_ms].export(output_path, format="wav")`). Создаёт
+родительские директории при необходимости. Возвращает `output_path`. Границы — целые/дробные мс
+(pydub принимает срез по мс).
+
+### Invariants
+1. Создаёт `output_path.parent` (`mkdir(parents=True, exist_ok=True)`).
+2. Файл `output_path` существует после вызова, длительность ≈ `end_ms - start_ms`.
+3. Возвращает строку `output_path`.
+
+### Test cases (unit, `tmp_path`)
+- **режет фрагмент**: из WAV длиной ~1000 мс `slice_wav(src, dst, 200, 700)` создаёт `dst`,
+  его длительность ≈ 500 мс (±20 мс)
+- **создаёт вложенные папки**: `slice_wav(src, tmp/"beats"/"x.wav", 0, 100)` создаёт директории
 - **возвращает путь**: результат равен переданному `output_path`

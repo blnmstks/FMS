@@ -1,6 +1,8 @@
 import wave
 from pathlib import Path
 
+from pydub import AudioSegment
+
 
 def write_wav(
     pcm: bytes,
@@ -19,4 +21,19 @@ def write_wav(
         wf.setsampwidth(sampwidth)
         wf.setframerate(sample_rate)
         wf.writeframes(pcm)
+    return output_path
+
+
+def wav_duration_ms(path: str) -> float:
+    # Длительность аудиофайла в миллисекундах (pydub).
+    return len(AudioSegment.from_file(path))
+
+
+def slice_wav(input_path: str, output_path: str, start_ms: float, end_ms: float) -> str:
+    # Вырезает фрагмент [start_ms:end_ms] из input_path и пишет его в output_path форматом wav,
+    # создавая родительские директории. Возвращает output_path. (Как в slice_segment.py — pydub.)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    clip = AudioSegment.from_file(input_path)[start_ms:end_ms]
+    clip.export(str(out), format="wav")
     return output_path
