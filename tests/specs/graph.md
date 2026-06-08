@@ -226,19 +226,27 @@
 - `scenario_row = (fetch_rows("scenarios","idea", idea_id) or [{}])[0]`;
   `scenario_id = scenario_row.get("id")`;
 - `segments = fetch_rows("audio_seg_prompts","scenario", scenario_id)` если `scenario_id`, иначе `[]`;
-- если `scenario_id is not None`: для каждого `seg` —
-  `path = generate_segment_audio(seg, idea_id)`, `insert_audio("local", path, "segment", seg["seg_id"])`;
-  затем `update_idea_status(idea_id, "audio_generated")` (строго после записей);
+- если `scenario_id is not None`: для каждого `seg` — **посегментная идемпотентность**: если
+  `fetch_rows("audio","seg_id", seg["seg_id"])` непусто (аудио уже сохранено), сегмент
+  **пропускается** (без генерации/вставки); иначе `path = generate_segment_audio(seg, idea_id)`,
+  `insert_audio("local", path, "segment", seg["seg_id"])`; затем
+  `update_idea_status(idea_id, "audio_generated")` (строго после записей);
 - `_advance(state, 10, {idea_id, idea_name})`.
 
+Авто-пропуск без `interrupt`: покрывает полный повтор (всё уже есть → ничего не генерим, просто
+метим статус) и частичный сбой (досинтезируем только недостающее, без дублей в `audio`).
 После шага статус `audio_generated` → диспетчер ведёт на шаг 11.
 
 ### Test cases
-- happy path (мок `fetch_idea_by_status`→idea, `fetch_rows`→scenarios `[{"id":3}]` и
-  audio_seg_prompts `[{"seg_id":11,...},{"seg_id":12,...}]`, `generate_segment_audio`→путь):
+- happy path (мок `fetch_idea_by_status`→idea, `fetch_rows`→scenarios `[{"id":3}]`,
+  audio_seg_prompts `[{"seg_id":11,...},{"seg_id":12,...}]`, audio→`[]`, `generate_segment_audio`→путь):
   `generate_segment_audio` вызван на каждый сегмент, `insert_audio("local", <path>, "segment",
   seg_id)` на каждый; вызван `update_idea_status(idea_id, "audio_generated")`; `pipeline_step == 11`,
   `10 in executed_steps`
+- частичный повтор (audio для seg_id=11 непусто, для seg_id=12 пусто): генерация/вставка вызваны
+  **только** для seg_id=12; вызван `update_idea_status(idea_id, "audio_generated")`; advance
+- всё уже есть (audio непусто для всех): `generate_segment_audio`/`insert_audio` не вызваны;
+  `update_idea_status(idea_id, "audio_generated")` вызван; advance
 - идеи нет: `generate_segment_audio`/`insert_audio`/`update_idea_status` не вызваны;
   `pipeline_step == 11`, `10 in executed_steps`
 - нет сценария (`fetch_rows`→`[]`): генерация/запись/смена статуса не вызваны; advance

@@ -449,6 +449,9 @@ def s10_generate_audio(state: ProjectState) -> dict:
     # автоматический (без interrupt). Статус меняется ТОЛЬКО после успешной генерации и записи
     # всех сегментов: при ошибке generate_segment_audio/insert_audio исключение пробрасывается,
     # статус и курсор не двигаются.
+    # Посегментная идемпотентность: сегмент, для которого в audio уже есть строка, пропускается —
+    # повторный заход (например, после прерванного прогона) досинтезирует только недостающее,
+    # без дублей и без перегенерации уже готового.
     idea = fetch_idea_by_status("audio_prompts_finished")
     if not idea.get("exists"):
         return _advance(state, 10)
@@ -461,12 +464,20 @@ def s10_generate_audio(state: ProjectState) -> dict:
     segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id) if scenario_id else []
 
     if scenario_id is not None:
-        print(f"\nSTATE 10 — synthesizing {len(segments)} audio segment(s) for idea: {idea_name}")
+        print(f"\nSTATE 10 — synthesizing audio for idea: {idea_name} ({len(segments)} segment(s))")
+        generated = skipped = 0
         for seg in segments:
+            if fetch_rows("audio", "seg_id", seg["seg_id"]):  # уже озвучен — пропускаем
+                skipped += 1
+                continue
             path = generate_segment_audio(seg, idea_id)
             insert_audio("local", path, "segment", seg["seg_id"])
+            generated += 1
         update_idea_status(idea_id, "audio_generated")
-        print(f"STATE 10 — audio saved and idea marked audio_generated: {idea_name}")
+        print(
+            f"STATE 10 — audio ready, idea marked audio_generated: {idea_name} "
+            f"(generated {generated}, skipped {skipped} existing)"
+        )
     return _advance(state, 10, {"idea_id": idea_id, "idea_name": idea_name})
 
 

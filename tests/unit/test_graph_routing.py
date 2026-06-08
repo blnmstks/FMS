@@ -458,13 +458,18 @@ def test_s9_audio_prompts_advances_without_work_when_no_idea():
 # --- s10_generate_audio ---
 
 
+_S10_SEGMENTS = [
+    {"seg_id": 11, "speaker": "Narrator", "emotion": "calm", "tts_text": "Hi."},
+    {"seg_id": 12, "speaker": "Host", "emotion": "excited", "tts_text": "Go!"},
+]
+
+
 def _fetch_rows_for_s10(table, column, value):
+    # Ни один сегмент ещё не озвучен (audio → []) — генерируются оба.
     return {
         "scenarios": [{"id": 3, "scenario": "SCEN"}],
-        "audio_seg_prompts": [
-            {"seg_id": 11, "speaker": "Narrator", "emotion": "calm", "tts_text": "Hi."},
-            {"seg_id": 12, "speaker": "Host", "emotion": "excited", "tts_text": "Go!"},
-        ],
+        "audio_seg_prompts": _S10_SEGMENTS,
+        "audio": [],
     }[table]
 
 
@@ -484,6 +489,66 @@ def test_s10_generate_audio_synthesizes_registers_and_advances():
     assert ins.call_count == 2
     ins.assert_any_call("local", "assets/audio/x.wav", "segment", 11)
     ins.assert_any_call("local", "assets/audio/x.wav", "segment", 12)
+    upd.assert_called_once_with(7, "audio_generated")
+    assert result["pipeline_step"] == 11
+    assert 10 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s10_generate_audio_skips_segments_with_existing_audio():
+    # Частичный повтор: у seg_id=11 аудио уже есть, у seg_id=12 — нет.
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+
+    def fetch_rows(table, column, value):
+        if table == "scenarios":
+            return [{"id": 3, "scenario": "SCEN"}]
+        if table == "audio_seg_prompts":
+            return _S10_SEGMENTS
+        if table == "audio":
+            return [{"id": 1}] if value == 11 else []
+        return []
+
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=fetch_rows),
+        patch("app.graph.generate_segment_audio", return_value="assets/audio/x.wav") as gen,
+        patch("app.graph.insert_audio") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s10_generate_audio({})
+
+    # сгенерирован/зарегистрирован только недостающий seg_id=12
+    gen.assert_called_once()
+    assert gen.call_args.args[0]["seg_id"] == 12
+    ins.assert_called_once_with("local", "assets/audio/x.wav", "segment", 12)
+    upd.assert_called_once_with(7, "audio_generated")
+    assert result["pipeline_step"] == 11
+    assert 10 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s10_generate_audio_all_segments_already_have_audio():
+    # Полный повтор: аудио есть у всех сегментов — генерации нет, но статус метится.
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+
+    def fetch_rows(table, column, value):
+        return {
+            "scenarios": [{"id": 3, "scenario": "SCEN"}],
+            "audio_seg_prompts": _S10_SEGMENTS,
+            "audio": [{"id": 1}],
+        }[table]
+
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=fetch_rows),
+        patch("app.graph.generate_segment_audio") as gen,
+        patch("app.graph.insert_audio") as ins,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s10_generate_audio({})
+
+    gen.assert_not_called()
+    ins.assert_not_called()
     upd.assert_called_once_with(7, "audio_generated")
     assert result["pipeline_step"] == 11
     assert 10 in result["executed_steps"]
