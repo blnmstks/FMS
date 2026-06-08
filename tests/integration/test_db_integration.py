@@ -564,3 +564,80 @@ def test_insert_and_delete_audio_beats_round_trip(pg_container, monkeypatch):
             "SELECT count(*) FROM audio_beats WHERE beat = %s", (beat_id,)
         ).fetchone()[0]
     assert remaining == 0
+
+
+@pytest.mark.integration
+def test_replace_video_prompts_round_trip_and_replaces(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+    db.migrate_audio_beat_prompts_table()
+    db.migrate_video_beat_prompts_table()
+
+    db.insert_idea("Idea for video prompts", "audio_beats_generated")
+    idea_id = db.fetch_idea_by_status("audio_beats_generated")["idea_id"]
+    db.insert_scenario("A scenario for video.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+        seg_id = conn.execute(
+            "INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING seg_id",
+            ("Narrator", "calm", "Hello world.", [1, 2], scenario_id),
+        ).fetchone()[0]
+        beat1 = conn.execute(
+            "INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s) RETURNING id",
+            (seg_id, "First beat line."),
+        ).fetchone()[0]
+        beat2 = conn.execute(
+            "INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s) RETURNING id",
+            (seg_id, "Second beat line."),
+        ).fetchone()[0]
+        conn.commit()
+
+    db.replace_video_prompts(
+        [
+            {"id": beat1, "video_prompt": "vp one", "end_frame": "ef one"},
+            {"id": beat2, "video_prompt": "vp two", "end_frame": "ef two"},
+        ],
+        scenario_id,
+    )
+
+    with psycopg.connect(pg_container) as conn:
+        rows = conn.execute(
+            "SELECT beat, video_prompt, end_frame FROM video_beat_prompts "
+            "WHERE beat IN (%s, %s) ORDER BY beat",
+            (beat1, beat2),
+        ).fetchall()
+    assert rows == [
+        (beat1, "vp one", "ef one"),
+        (beat2, "vp two", "ef two"),
+    ]
+
+    # повторный вызов заменяет прежние строки (не накапливает)
+    db.replace_video_prompts(
+        [{"id": beat1, "video_prompt": "vp only", "end_frame": "ef only"}],
+        scenario_id,
+    )
+    with psycopg.connect(pg_container) as conn:
+        count = conn.execute(
+            "SELECT count(*) FROM video_beat_prompts WHERE beat IN (%s, %s)",
+            (beat1, beat2),
+        ).fetchone()[0]
+        vp = conn.execute(
+            "SELECT video_prompt FROM video_beat_prompts WHERE beat = %s", (beat1,)
+        ).fetchone()[0]
+    assert count == 1
+    assert vp == "vp only"

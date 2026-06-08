@@ -15,6 +15,7 @@ from app.db import (
     migrate_image_prompts_table,
     migrate_images_table,
     migrate_scenarios_table,
+    migrate_video_beat_prompts_table,
     migrate_visual_styles_table,
     upsert_channel_info,
     upsert_channel_style_info,
@@ -37,6 +38,7 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
     migrate_audio_beat_prompts_table()
     migrate_audio_table()
     migrate_audio_beats_table()
+    migrate_video_beat_prompts_table()
     app = build_app(checkpointer)
 
     initial_state = fetch_channel_info()

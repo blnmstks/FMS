@@ -1160,9 +1160,17 @@ def test_ideas_statuses_has_audio_beats_generated():
 
 @pytest.mark.unit
 def test_ideas_statuses_audio_beats_replaces_clips_generated():
-    # audio_beats_generated заняло позицию между audio_generated и video_done.
+    # audio_beats_generated стоит между audio_generated и video_prompts_finished.
     i = IDEAS_STATUSES.index("audio_beats_generated")
     assert IDEAS_STATUSES[i - 1] == "audio_generated"
+    assert IDEAS_STATUSES[i + 1] == "video_prompts_finished"
+
+
+@pytest.mark.unit
+def test_ideas_statuses_video_prompts_finished_before_video_done():
+    # video_prompts_finished (шаг 12) вставлен между audio_beats_generated и video_done.
+    i = IDEAS_STATUSES.index("video_prompts_finished")
+    assert IDEAS_STATUSES[i - 1] == "audio_beats_generated"
     assert IDEAS_STATUSES[i + 1] == "video_done"
 
 
@@ -1269,3 +1277,110 @@ def test_relation_edges_includes_audio_beats():
     from app.db import RELATION_EDGES
 
     assert ("audio_beats", "beat", "audio_beat_prompts") in RELATION_EDGES
+
+
+# --- VIDEO_PROMPT_FIELDS ---
+
+
+@pytest.mark.unit
+def test_video_prompt_fields_values():
+    from app.db import VIDEO_PROMPT_FIELDS
+
+    assert VIDEO_PROMPT_FIELDS == ["video_prompt", "end_frame"]
+
+
+# --- migrate_video_beat_prompts_table ---
+
+
+@pytest.mark.unit
+def test_migrate_video_beat_prompts_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_video_beat_prompts_table
+
+    migrate_video_beat_prompts_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS video_beat_prompts" in c for c in calls)
+    assert any("REFERENCES audio_beat_prompts(id)" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_video_beat_prompts_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_video_beat_prompts_table
+
+    migrate_video_beat_prompts_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS video_beat_prompts" in str(c)
+    )
+    for col in ("beat", "video_prompt", "end_frame"):
+        assert col in create_call
+
+
+# --- replace_video_prompts ---
+
+
+def _sample_video_beats():
+    return [
+        {"id": 1, "video_prompt": "vp one", "end_frame": "ef one"},
+        {"id": 2, "video_prompt": "vp two", "end_frame": "ef two"},
+    ]
+
+
+@pytest.mark.unit
+def test_replace_video_prompts_deletes_then_inserts(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import replace_video_prompts
+
+    replace_video_prompts(_sample_video_beats(), 7)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert sum("DELETE FROM video_beat_prompts" in c for c in calls) == 1
+    assert sum("INSERT INTO video_beat_prompts" in c for c in calls) == 2
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_replace_video_prompts_insert_passes_beat_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import replace_video_prompts
+
+    replace_video_prompts(_sample_video_beats(), 7)
+
+    inserts = [
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO video_beat_prompts" in str(c)
+    ]
+    assert inserts[0].args[1] == (1, "vp one", "ef one")
+    assert inserts[1].args[1] == (2, "vp two", "ef two")
+
+
+@pytest.mark.unit
+def test_replace_video_prompts_empty_list_only_deletes(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import replace_video_prompts
+
+    replace_video_prompts([], 7)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert sum("DELETE FROM video_beat_prompts" in c for c in calls) == 1
+    assert sum("INSERT INTO video_beat_prompts" in c for c in calls) == 0
+    mock_conn.commit.assert_called_once()
+
+
+# --- RELATION_EDGES: video_beat_prompts ---
+
+
+@pytest.mark.unit
+def test_relation_edges_includes_video_beat_prompts():
+    from app.db import RELATION_EDGES
+
+    assert ("video_beat_prompts", "beat", "audio_beat_prompts") in RELATION_EDGES

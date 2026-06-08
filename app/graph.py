@@ -21,6 +21,7 @@ from app.db import (
     insert_image_prompt,
     insert_scenario,
     replace_audio_prompts,
+    replace_video_prompts,
     update_idea_status,
     upsert_visual_styles,
 )
@@ -33,6 +34,7 @@ from app.services.ideas import generate_video_ideas
 from app.services.image_prompts import generate_image_prompt
 from app.services.scenarios import generate_scenario
 from app.services.transcripts import analyze_transcripts
+from app.services.video_prompts import generate_video_prompts
 from app.services.visual_styles import generate_visual_style
 from app.state import ProjectState
 from app.utils.files import read_from_vault, read_text_file, save_to_vault
@@ -540,8 +542,66 @@ def s11_generate_beats(state: ProjectState) -> dict:
     return _advance(state, 11, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s12_video_prompts(state: ProjectState) -> dict:
+    # Шаг 12: по идее со статусом audio_beats_generated генерирует через ИИ для КАЖДОГО уже
+    # существующего бита сценария видео-промпт (video_prompt) и финальный кадр (end_frame),
+    # сохраняет их в video_beat_prompts (заменяя прежние, replace_video_prompts), переводит идею в
+    # video_prompts_finished. Узел самодостаточен. Биты НЕ создаются — берутся из audio_beat_prompts,
+    # длительность — реальная, из audio_beats (шаг 11); один LLM-проход по всем битам ради сцепки
+    # end_frame[i] -> вход клипа[i+1]. Если видео-промпты уже есть — предлагает перейти к следующему
+    # шагу или перегенерировать; иначе генерирует сразу. Статус меняется ТОЛЬКО после успешной
+    # записи: при ошибке исключение пробрасывается, статус и курсор не двигаются.
+    idea = fetch_idea_by_status("audio_beats_generated")
+    if not idea.get("exists"):
+        return _advance(state, 12)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_text = scenario_row.get("scenario", "")
+    scenario_id = scenario_row.get("id")
+    if scenario_id is None:
+        return _advance(state, 12, {"idea_id": idea_id, "idea_name": idea_name})
+
+    # Собираем биты сценария в порядке id (= порядок сценария) с реальной длительностью из audio_beats.
+    segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id)
+    beats: list[dict] = []
+    for seg in segments:
+        beats.extend(fetch_rows("audio_beat_prompts", "seg_id", seg["seg_id"]))
+    beats.sort(key=lambda b: b["id"])
+    beat_inputs = []
+    for b in beats:
+        audio_beat = fetch_rows("audio_beats", "beat", b["id"])
+        duration = audio_beat[0]["duration"] if audio_beat else None
+        beat_inputs.append(
+            {"id": b["id"], "audio_text": b.get("audio_text") or "", "duration": duration}
+        )
+
+    existing = [b for b in beats if fetch_rows("video_beat_prompts", "beat", b["id"])]
+    if existing:
+        choice = interrupt(
+            f"STATE 12 — Found {len(existing)} existing video prompt(s) for this scenario.\n"
+            f"[1] Continue to next step  [2] Generate new\nChoose (1/2):"
+        )
+        if choice.strip() == "1":
+            update_idea_status(idea_id, "video_prompts_finished")
+            return _advance(state, 12, {"idea_id": idea_id, "idea_name": idea_name})
+
+    print(f"\nSTATE 12 — generating video prompts for idea: {idea_name}")
+    visual_row = (fetch_rows("visual_styles", "idea", idea_id) or [{}])[0]
+    visual_style = {f: visual_row.get(f) for f in VISUAL_STYLE_FIELDS}
+    characters = fetch_rows("characters_sheet", "scenario", scenario_id)
+
+    result = generate_video_prompts(scenario_text, visual_style, characters, beat_inputs)
+    replace_video_prompts(result.get("beats") or [], scenario_id)
+    update_idea_status(idea_id, "video_prompts_finished")
+    print(f"STATE 12 — video prompts saved and idea marked video_prompts_finished: {idea_name}")
+    return _advance(state, 12, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 12..13: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шагов 13..14: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -588,7 +648,8 @@ g.add_node("s8", s8_generate_image)
 g.add_node("s9", s9_audio_prompts)
 g.add_node("s10", s10_generate_audio)
 g.add_node("s11", s11_generate_beats)
-for _n in range(12, 14):  # шаги 12..13 — заглушки из фабрики
+g.add_node("s12", s12_video_prompts)
+for _n in range(13, 15):  # шаги 13..14 — заглушки из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")
@@ -598,12 +659,12 @@ g.add_edge("s3", "dispatch")
 g.add_conditional_edges("s4", _route_s4, {"s4_pick": "s4_pick", "dispatch": "dispatch"})
 g.add_edge("s4_pick", "dispatch")
 
-# Диспетчер ведёт на любой из шагов 4..13 или завершает граф.
-_dispatch_targets = {f"s{n}": f"s{n}" for n in range(4, 14)}
+# Диспетчер ведёт на любой из шагов 4..14 или завершает граф.
+_dispatch_targets = {f"s{n}": f"s{n}" for n in range(4, 15)}
 _dispatch_targets[END] = END
 g.add_conditional_edges("dispatch", _route_dispatch, _dispatch_targets)
 
-for _n in range(5, 14):  # после каждого шага конвейера — назад в диспетчер
+for _n in range(5, 15):  # после каждого шага конвейера — назад в диспетчер
     g.add_edge(f"s{_n}", "dispatch")
 
 

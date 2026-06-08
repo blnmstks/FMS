@@ -17,6 +17,7 @@ from app.graph import (
     s9_audio_prompts,
     s10_generate_audio,
     s11_generate_beats,
+    s12_video_prompts,
     select_target_step,
 )
 
@@ -734,15 +735,161 @@ def test_s11_generate_beats_skips_when_no_scenario():
     assert 11 in result["executed_steps"]
 
 
-# --- stub factory s12..s13 ---
+# --- s12_video_prompts ---
+
+
+_S12_SEGMENTS = [{"seg_id": 11}]
+_S12_BEATS = {11: [{"id": 102, "audio_text": "B"}, {"id": 101, "audio_text": "A"}]}
+_S12_AUDIO_BEATS = {101: [{"duration": 3.2}], 102: [{"duration": 2.1}]}
+_S12_VISUAL = [{f: f"v_{f}" for f in VISUAL_STYLE_FIELDS}]
+_S12_CHARS = [{"name": "Jack"}]
+_VIDEO_RESULT = {
+    "beats": [
+        {"id": 101, "video_prompt": "vp1", "end_frame": "ef1"},
+        {"id": 102, "video_prompt": "vp2", "end_frame": "ef2"},
+    ]
+}
+# beat_inputs, ожидаемые на входе сервиса: отсортированы по id, с реальной длительностью.
+_EXPECTED_BEAT_INPUTS = [
+    {"id": 101, "audio_text": "A", "duration": 3.2},
+    {"id": 102, "audio_text": "B", "duration": 2.1},
+]
+
+
+def _fetch_rows_for_s12(video_for):
+    # video_for(beat_id) -> существующие строки video_beat_prompts для бита (для идемпотентности).
+    def fetch_rows(table, column, value):
+        if table == "scenarios":
+            return [{"id": 3, "scenario": "SCEN"}]
+        if table == "audio_seg_prompts":
+            return _S12_SEGMENTS
+        if table == "audio_beat_prompts":
+            return _S12_BEATS[value]
+        if table == "audio_beats":
+            return _S12_AUDIO_BEATS[value]
+        if table == "video_beat_prompts":
+            return video_for(value)
+        if table == "visual_styles":
+            return _S12_VISUAL
+        if table == "characters_sheet":
+            return _S12_CHARS
+        return []
+
+    return fetch_rows
+
+
+@pytest.mark.unit
+def test_s12_video_prompts_generates_replaces_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s12(lambda v: [])),
+        patch("app.graph.interrupt") as itr,
+        patch("app.graph.generate_video_prompts", return_value=_VIDEO_RESULT) as gen,
+        patch("app.graph.replace_video_prompts") as rep,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s12_video_prompts({})
+
+    itr.assert_not_called()
+    gen.assert_called_once()
+    args = gen.call_args.args
+    assert args[0] == "SCEN"  # scenario_text
+    assert args[3] == _EXPECTED_BEAT_INPUTS  # beat_inputs, отсортированы, с длительностью
+    rep.assert_called_once_with(_VIDEO_RESULT["beats"], 3)
+    upd.assert_called_once_with(7, "video_prompts_finished")
+    assert result["pipeline_step"] == 13
+    assert 12 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s12_video_prompts_existing_continue_advances_without_generating():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s12(lambda v: [{"id": 1}])),
+        patch("app.graph.interrupt", return_value="1"),
+        patch("app.graph.generate_video_prompts") as gen,
+        patch("app.graph.replace_video_prompts") as rep,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s12_video_prompts({})
+
+    gen.assert_not_called()
+    rep.assert_not_called()
+    upd.assert_called_once_with(7, "video_prompts_finished")
+    assert result["pipeline_step"] == 13
+    assert 12 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s12_video_prompts_existing_regenerate_replaces_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s12(lambda v: [{"id": 1}])),
+        patch("app.graph.interrupt", return_value="2"),
+        patch("app.graph.generate_video_prompts", return_value=_VIDEO_RESULT) as gen,
+        patch("app.graph.replace_video_prompts") as rep,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s12_video_prompts({})
+
+    gen.assert_called_once()
+    rep.assert_called_once_with(_VIDEO_RESULT["beats"], 3)
+    upd.assert_called_once_with(7, "video_prompts_finished")
+    assert result["pipeline_step"] == 13
+
+
+@pytest.mark.unit
+def test_s12_video_prompts_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.interrupt") as itr,
+        patch("app.graph.generate_video_prompts") as gen,
+        patch("app.graph.replace_video_prompts") as rep,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s12_video_prompts({})
+
+    itr.assert_not_called()
+    gen.assert_not_called()
+    rep.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 13
+    assert 12 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s12_video_prompts_skips_when_no_scenario():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", return_value=[]),  # нет сценария
+        patch("app.graph.interrupt") as itr,
+        patch("app.graph.generate_video_prompts") as gen,
+        patch("app.graph.replace_video_prompts") as rep,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s12_video_prompts({})
+
+    itr.assert_not_called()
+    gen.assert_not_called()
+    rep.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 13
+    assert 12 in result["executed_steps"]
+
+
+# --- stub factory s13..s14 ---
 
 
 @pytest.mark.unit
 def test_make_stub_prints_and_advances(capsys):
-    stub = _make_stub(12)
+    stub = _make_stub(13)
     with patch("app.graph.fetch_idea_by_status", return_value={"idea_name": "X", "exists": True}):
         result = stub({})
 
-    assert result["pipeline_step"] == 13
-    assert 12 in result["executed_steps"]
-    assert "STATE 12" in capsys.readouterr().out
+    assert result["pipeline_step"] == 14
+    assert 13 in result["executed_steps"]
+    assert "STATE 13" in capsys.readouterr().out

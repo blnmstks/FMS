@@ -321,6 +321,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
 - `("images", "image_prompt", "image_prompts")`
 - `("audio_seg_prompts", "scenario", "scenarios")`
 - `("audio_beats", "beat", "audio_beat_prompts")`
+- `("video_beat_prompts", "beat", "audio_beat_prompts")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -908,4 +909,84 @@ CREATE TABLE IF NOT EXISTS audio_beats (
 - **delete вызван**: `cur.execute` вызывается с SQL содержащим `DELETE FROM audio_beats`
 - **параметр**: параметр == `([1, 2, 3],)`
 - **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## Константа `VIDEO_PROMPT_FIELDS`
+Единственный источник истины для колонок видео-промпта бита (таблица `video_beat_prompts`):
+`video_prompt`, `end_frame`. Используется в `migrate_video_beat_prompts_table` (DDL — косвенно,
+через перечисление колонок) и в сервисе/узле как набор полей ответа LLM.
+
+---
+
+## `migrate_video_beat_prompts_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `video_beat_prompts` — видео-промпт и финальный кадр **на каждый
+бит** (шаг 12). По образцу `audio_beats` ссылается на `audio_beat_prompts(id)`. Запускать
+**после** `migrate_audio_beat_prompts_table` (FK `beat` ссылается на `audio_beat_prompts(id)`).
+
+SQL:
+```sql
+CREATE TABLE IF NOT EXISTS video_beat_prompts (
+    id SERIAL PRIMARY KEY,
+    beat INTEGER REFERENCES audio_beat_prompts(id),
+    video_prompt TEXT,
+    end_frame TEXT
+)
+```
+- `id` — первичный ключ `SERIAL`.
+- `beat` — FK на `audio_beat_prompts(id)`.
+- `video_prompt` — самодостаточное описание клипа бита (`TEXT`).
+- `end_frame` — описание финального кадра, вход для следующего клипа (`TEXT`).
+
+Всегда вызывает `conn.commit()`.
+
+**Примечание:** таблица входит в `RELATION_EDGES`
+(`("video_beat_prompts", "beat", "audio_beat_prompts")`) — родитель `audio_beat_prompts` имеет PK
+`id`, поэтому `fetch_related`/`fetch_rows` работают корректно (как пара `audio_beats` ↔
+`audio_beat_prompts`).
+
+### Invariants
+1. Идемпотентна (`CREATE TABLE IF NOT EXISTS`).
+2. Колонки: `id`, `beat`, `video_prompt`, `end_frame`.
+3. Колонка `beat` — FK на `audio_beat_prompts(id)`.
+4. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS video_beat_prompts`
+- **FK на audio_beat_prompts**: SQL содержит `REFERENCES audio_beat_prompts(id)`
+- **колонки**: SQL содержит `video_prompt`, `end_frame`, `beat`
+- **commit вызван**: `conn.commit()` вызывается ровно один раз
+
+---
+
+## `replace_video_prompts(beats: list[dict], scenario_id: int) -> None`
+
+### Contract
+Идемпотентно пересоздаёт видео-промпты битов одного сценария (шаг 12). Формат `beats` — из ответа
+LLM: `{id (= существующий audio_beat_prompts.id), video_prompt, end_frame}`.
+
+Порядок в одной транзакции:
+1. `DELETE FROM video_beat_prompts WHERE beat IN (SELECT id FROM audio_beat_prompts WHERE seg_id
+   IN (SELECT seg_id FROM audio_seg_prompts WHERE scenario=%s))` — удаляет прежние строки только
+   для битов этого сценария.
+2. На каждый бит: `INSERT INTO video_beat_prompts (beat, video_prompt, end_frame) VALUES (%s,%s,%s)`
+   с параметрами `(beat.get("id"), beat.get("video_prompt"), beat.get("end_frame"))`.
+
+Один `conn.commit()` на всю операцию (атомарность: при ошибке — откат, прежние данные целы).
+
+### Invariants
+1. Сначала один `DELETE` (по битам сценария), затем по `INSERT` на каждый бит.
+2. `beat` каждого INSERT — `beat["id"]` (существующий `audio_beat_prompts.id`).
+3. Ровно один `conn.commit()`.
+4. Пустой список → только удаление (очистка видео-промптов сценария).
+
+### Test cases
+- **порядок**: один `DELETE FROM video_beat_prompts`, затем по `INSERT INTO video_beat_prompts`
+  на каждый бит
+- **параметры insert**: на бит `{"id":1,"video_prompt":"vp","end_frame":"ef"}` — INSERT с
+  `(1, "vp", "ef")`
+- **пустой список**: только `DELETE`, нет `INSERT`
+- **commit один раз**: `conn.commit()` вызывается ровно один раз
 

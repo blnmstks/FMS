@@ -3,7 +3,8 @@
 Начиная с шага 5, маршрут определяется статусами идей в таблице `ideas`. Соответствие
 статус → шаг линейное (из `IDEAS_STATUSES`): `raw_idea→5`, `scenario_finished→6`,
 `clips_visual_style_finished→7`, `image_prompt_finished→8`, `image_generated→9`,
-`audio_prompts_finished→10`, `audio_generated→11`, `audio_beats_generated→12`, `video_done→13`.
+`audio_prompts_finished→10`, `audio_generated→11`, `audio_beats_generated→12`,
+`video_prompts_finished→13`, `video_done→14`.
 
 ## `STEP_BY_STATUS`
 Словарь `{status: 5 + index}` из `IDEAS_STATUSES` (единственный источник истины — порядок
@@ -25,6 +26,7 @@
 - предыдущий, когда своего нет: `({"raw_idea"}, 8) == 5`
 - только последующие: `({"audio_generated"}, 5) == 11`
 - image_generated → шаг 9: `({"image_generated"}, 8) == 9`
+- audio_beats_generated → шаг 12: `({"audio_beats_generated"}, 5) == 12`
 - нет идей: `(set(), 5) == 4`
 
 ## `dispatch(state) -> dict`
@@ -290,21 +292,74 @@
 - идеи нет: `slice_segment_beats`/`insert_audio_beat`/`update_idea_status` не вызваны; advance до 12
 - нет сценария (`fetch_rows`→`[]`): нарезка/запись/смена статуса не вызваны; advance
 
-## Стабы шагов 12–13 — фабрика `_make_stub(n)`
+## `s12_video_prompts(state) -> dict`
+Шаг 12: по идее со статусом `audio_beats_generated` генерирует через ИИ для **каждого
+существующего бита** сценария видео-промпт (`video_prompt`) и финальный кадр (`end_frame`),
+сохраняет их в `video_beat_prompts` (заменяя прежние, `replace_video_prompts`), переводит идею в
+`video_prompts_finished`. Узел самодостаточен (не доверяет state). Биты НЕ создаются — берутся из
+`audio_beat_prompts`, длительность — из `audio_beats.duration` (реальная). Статус меняется ТОЛЬКО
+после успешной записи — при ошибке исключение пробрасывается, статус и курсор не двигаются.
+
+Поток:
+- `idea = fetch_idea_by_status("audio_beats_generated")`; если `not idea["exists"]` — защитный
+  `_advance(state, 12)` без работы (и без `interrupt`);
+- `scenario_row = (fetch_rows("scenarios","idea", idea_id) or [{}])[0]`;
+  `scenario_text = scenario_row.get("scenario","")`, `scenario_id = scenario_row.get("id")`;
+  если `scenario_id is None` — защитный `_advance(state, 12, {idea_id, idea_name})` без работы
+  (без `interrupt`/генерации);
+- **сбор битов**: `segments = fetch_rows("audio_seg_prompts","scenario", scenario_id)`; для каждого
+  сегмента `fetch_rows("audio_beat_prompts","seg_id", seg["seg_id"])`, объединить и отсортировать по
+  `id` (= порядок сценария); на каждый бит длительность —
+  `fetch_rows("audio_beats","beat", beat["id"])[0]["duration"]` (если нет — `None`) → входы
+  `beat_inputs = [{"id","audio_text","duration"}]`;
+- `existing = [b for b in beats if fetch_rows("video_beat_prompts","beat", b["id"])]`;
+- **если `existing` непусто** → `interrupt("STATE 12 — Found N existing … [1] Continue to next step
+  [2] Generate new\nChoose (1/2):")`:
+  - `choice.strip() == "1"` → `update_idea_status(idea_id, "video_prompts_finished")`,
+    `_advance(state, 12, {idea_id, idea_name})` (на шаг 13) — генерации/записи нет;
+  - иначе («2») → проваливается в генерацию;
+- **генерация** (нет `existing` ИЛИ выбран «2»): `visual_row = (fetch_rows("visual_styles","idea",
+  idea_id) or [{}])[0]`, `visual_style = {f: visual_row.get(f) for f in VISUAL_STYLE_FIELDS}`;
+  `characters = fetch_rows("characters_sheet","scenario", scenario_id)`;
+  `result = generate_video_prompts(scenario_text, visual_style, characters, beat_inputs)`;
+  `replace_video_prompts(result.get("beats") or [], scenario_id)`, затем
+  `update_idea_status(idea_id, "video_prompts_finished")` (статус — строго ПОСЛЕ записи);
+- `_advance(state, 12, {idea_id, idea_name})`.
+
+`interrupt` — только при наличии `existing` и ПОСЛЕ guard'а (read-операции идемпотентны при resume).
+После шага статус `video_prompts_finished` → диспетчер ведёт на шаг 13.
+
+### Test cases
+- happy path (мок `fetch_idea_by_status`→idea, `fetch_rows` для scenarios `[{"id":3}]`,
+  audio_seg_prompts `[{"seg_id":11}]`, audio_beat_prompts→биты `[{"id":1,"audio_text":"Hi"}]`,
+  audio_beats→`[{"duration":3.2}]`, visual_styles `[{...}]`, characters_sheet `[{...}]`,
+  video_beat_prompts→`[]`; `generate_video_prompts`→`{"beats":[...]}`): `generate_video_prompts`
+  вызван с `beat_inputs`, `replace_video_prompts(beats, 3)`, `update_idea_status(idea_id,
+  "video_prompts_finished")`; `pipeline_step == 13`, `12 in executed_steps`; `interrupt` не вызван
+- existing + «1» (video_beat_prompts непусто, `interrupt`→"1"): `generate_video_prompts`/
+  `replace_video_prompts` НЕ вызваны; вызван `update_idea_status(idea_id, "video_prompts_finished")`;
+  `pipeline_step == 13`, `12 in executed_steps`
+- existing + «2»: вызваны `generate_video_prompts`, `replace_video_prompts(beats, 3)`,
+  `update_idea_status(...)`; advance
+- идеи нет: `generate_video_prompts`/`replace_video_prompts`/`update_idea_status` не вызваны;
+  `pipeline_step == 13`, `12 in executed_steps`; `interrupt` не вызван
+- нет сценария (`fetch_rows`→`[]`): генерация/запись/смена статуса не вызваны; advance
+
+## Стабы шагов 13–14 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(12)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 13`,
-  `12 in executed_steps`; в stdout `STATE 12`
+- `_make_stub(13)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 14`,
+  `13 in executed_steps`; в stdout `STATE 13`
 
 ## Поток графа
 ```
 START → s1 → (s2) → s3 → dispatch
-dispatch → _route_dispatch → s4 | s5..s13 | END
+dispatch → _route_dispatch → s4 | s5..s14 | END
 s4 → _route_s4 → s4_pick | dispatch
 s4_pick → dispatch
-s5..s13 → dispatch
+s5..s14 → dispatch
 ```
 `_route_s4`: `generated_ideas` есть → `"s4_pick"`, иначе → `"dispatch"`.
 `_route_s5` удалён (его роль перешла диспетчеру).

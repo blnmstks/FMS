@@ -16,6 +16,7 @@ IDEAS_STATUSES = [
     "audio_prompts_finished",
     "audio_generated",
     "audio_beats_generated",
+    "video_prompts_finished",
     "video_done",
 ]
 
@@ -56,6 +57,12 @@ IMAGE_PROMPT_FIELDS = [
     "action",
 ]
 
+# Единственный источник истины для колонок видео-промпта бита (таблица video_beat_prompts).
+VIDEO_PROMPT_FIELDS = [
+    "video_prompt",
+    "end_frame",
+]
+
 # Реестр FK-рёбер графа данных: (таблица-потомок, колонка-FK, таблица-родитель),
 # смысл — child.<fk_column> -> parent.id. Единственный источник истины для fetch_related.
 # ВАЖНО: имена таблиц/колонок берутся ТОЛЬКО отсюда (доверенный whitelist), никогда из
@@ -69,6 +76,7 @@ RELATION_EDGES = [
     ("images", "image_prompt", "image_prompts"),
     ("audio_seg_prompts", "scenario", "scenarios"),
     ("audio_beats", "beat", "audio_beat_prompts"),
+    ("video_beat_prompts", "beat", "audio_beat_prompts"),
 ]
 
 
@@ -445,6 +453,48 @@ def delete_audio_beats_for_beats(beat_ids: list[int]) -> None:
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM audio_beats WHERE beat = ANY(%s)", (beat_ids,))
+        conn.commit()
+
+
+def migrate_video_beat_prompts_table() -> None:
+    # Идемпотентно создаёт таблицу video_beat_prompts — видео-промпт (video_prompt) и финальный
+    # кадр (end_frame) на КАЖДЫЙ бит (шаг 12). По образцу audio_beats ссылается на
+    # audio_beat_prompts(id): beat — FK на audio_beat_prompts(id). Запускать после
+    # migrate_audio_beat_prompts_table. Безопасно запускать многократно.
+    # Таблица входит в RELATION_EDGES: родитель audio_beat_prompts имеет PK id, поэтому
+    # fetch_related/fetch_rows работают (как пара audio_beats ↔ audio_beat_prompts).
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS video_beat_prompts (
+                    id SERIAL PRIMARY KEY,
+                    beat INTEGER REFERENCES audio_beat_prompts(id),
+                    video_prompt TEXT,
+                    end_frame TEXT
+                )
+            """)
+        conn.commit()
+
+
+def replace_video_prompts(beats: list[dict], scenario_id: int) -> None:
+    # Идемпотентно пересоздаёт видео-промпты битов одного сценария (шаг 12). Сначала удаляет
+    # прежние строки video_beat_prompts только для битов этого сценария, затем вставляет новые.
+    # Формат beats — из ответа LLM: {id (= существующий audio_beat_prompts.id), video_prompt,
+    # end_frame}. Один коммит на всю операцию (атомарность). Пустой список — только удаление.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM video_beat_prompts WHERE beat IN "
+                "(SELECT id FROM audio_beat_prompts WHERE seg_id IN "
+                "(SELECT seg_id FROM audio_seg_prompts WHERE scenario=%s))",
+                (scenario_id,),
+            )
+            for beat in beats:
+                cur.execute(
+                    "INSERT INTO video_beat_prompts (beat, video_prompt, end_frame) "
+                    "VALUES (%s, %s, %s)",
+                    (beat.get("id"), beat.get("video_prompt"), beat.get("end_frame")),
+                )
         conn.commit()
 
 
