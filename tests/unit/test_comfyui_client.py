@@ -33,6 +33,27 @@ def test_upload_image_posts_multipart_and_returns_json(tmp_path, mock_requests):
 
 
 @pytest.mark.unit
+def test_upload_audio_posts_to_upload_image_endpoint_and_returns_json(tmp_path, mock_requests):
+    from app.infrastructure.comfyui_client import upload_audio
+
+    wav = tmp_path / "beat.wav"
+    wav.write_bytes(b"RIFF\x00\x00")
+    mock_requests.post.return_value.json.return_value = {
+        "name": "beat.wav",
+        "subfolder": "",
+        "type": "input",
+    }
+
+    result = upload_audio(str(wav))
+
+    args, kwargs = mock_requests.post.call_args
+    assert args[0] == f"{COMFYUI_URL}/upload/image"
+    assert "image" in kwargs["files"]
+    assert result == {"name": "beat.wav", "subfolder": "", "type": "input"}
+    mock_requests.post.return_value.raise_for_status.assert_called_once()
+
+
+@pytest.mark.unit
 def test_queue_prompt_posts_workflow_and_returns_prompt_id(mock_requests):
     from app.infrastructure.comfyui_client import queue_prompt
 

@@ -1,7 +1,8 @@
 # Spec: `app/services/comfyui`
 
-Оркестрация генерации изображения через ComfyUI: собирает `utils/workflow` +
-`infrastructure/comfyui_client`. Решения и порядок шагов живут здесь.
+Оркестрация генерации изображения (шаг 8) и видео-клипов (шаг 13) через ComfyUI: собирает
+`utils/workflow` + `utils/audio` + `infrastructure/comfyui_client`. Решения и порядок шагов
+живут здесь.
 
 ## `generate_image(workflow_path, prompt_text, prompt_node_id, output_path, image_path=None, image_node_id=None, poll_interval=1.0, timeout=DEFAULT_TIMEOUT) -> str`
 
@@ -16,10 +17,10 @@
    `set_node_input(wf, image_node_id, "image", name)`.
 4. `client_id = uuid4().hex`; `prompt_id = queue_prompt(wf, client_id)`.
 5. Polling `get_history(prompt_id)` каждые `poll_interval` сек, пока в
-   `history[prompt_id]["outputs"]` не появятся данные. По истечении `timeout` —
+   `history[prompt_id]["outputs"]` не появится выходной файл. По истечении `timeout` —
    `TimeoutError`.
-6. Берётся первое изображение из `outputs` (первая нода, её первый элемент `images`):
-   `{filename, subfolder, type}`.
+6. Берётся первый выходной файл через `_first_output_file` (первая нода, первый элемент по
+   ключу `images`/`gifs`/`videos`): `{filename, subfolder, type}`.
 7. `data = download_image(filename, subfolder, type)`; байты пишутся в `output_path`
    (родительская папка создаётся при необходимости).
 8. Возвращает `output_path`.
@@ -73,6 +74,60 @@
 3. При пустом `out` имя содержит stem workflow-файла и оканчивается на `.png`, путь — под
    `images_dir`.
 
+## `_first_output_file(outputs: dict) -> dict | None`
+
+### Contract
+Возвращает первый выходной файл из `outputs` (значения нод) по любому из ключей
+`images`/`gifs`/`videos`: `{filename, subfolder, type}`. Нужен, потому что нода SaveVideo
+кладёт результат под ключ, отличный от `images` (у картинок — `images`). Если файлов нет —
+`None`. Общий для `generate_image` и `generate_beat_clip` (через `_wait_for_output`).
+
+### Invariants
+1. Перебор нод в порядке `outputs.values()`, ключей — `images`→`gifs`→`videos`.
+2. Возвращает первый непустой `files[0]` либо `None`.
+
+## `build_video_prompt_text(video_beat_prompt: dict) -> str`
+
+### Contract
+Объединяет непустые поля видео-промпта бита в порядке `VIDEO_PROMPT_FIELDS`
+(`video_prompt`, `end_frame`) через `", "` (как `build_prompt_text` для картинок). Пустые/
+отсутствующие поля пропускаются; лишние ключи строки БД (`id`, `beat`) игнорируются.
+Изолирована намеренно — точная «сцепка» промпта будет дорабатываться.
+
+### Invariants
+1. Порядок частей соответствует `VIDEO_PROMPT_FIELDS`.
+2. Пустые значения (`None`/`""`) не попадают в результат.
+
+## `generate_beat_clip(prompt_text, first_frame_path, audio_path, idea_id, beat_id, poll_interval=1.0, timeout=DEFAULT_VIDEO_TIMEOUT) -> str`
+
+`DEFAULT_VIDEO_TIMEOUT = 1800.0` — видео медленнее картинки (LTX-2.3: загрузка + сэмплинг +
+апскейл).
+
+### Contract
+Бизнес-логика генерации видео-клипа одного бита (шаг 13):
+1. `wf = load_workflow(COMFYUI_VIDEO_WORKFLOW)`.
+2. `set_node_input(wf, COMFYUI_VIDEO_PROMPT_NODE, "value", prompt_text)`.
+3. `name = upload_image(first_frame_path)["name"]`; `set_node_input(wf,
+   COMFYUI_VIDEO_IMAGE_NODE, "image", name)`.
+4. `name = upload_audio(audio_path)["name"]`; `set_node_input(wf, COMFYUI_VIDEO_AUDIO_NODE,
+   "audio", name)`.
+5. `set_node_input(wf, COMFYUI_VIDEO_DURATION_NODE, "value", wav_duration_seconds(audio_path))`
+   — точная длина того же файла, что заливаем (длина видео = длина аудио, без рассинхрона).
+6. `prompt_id = queue_prompt(wf, uuid4().hex)`; ждём `_wait_for_output(...)`.
+7. `data = download_image(filename, subfolder, type)`; пишем в
+   `VIDEOS_DIR/clips/idea-<idea_id>-beat-<beat_id>-<timestamp><ext>` (ext — из имени файла
+   ComfyUI, иначе `.mp4`), создавая папку. Возвращает путь.
+
+### Invariants
+1. Промпт всегда в `COMFYUI_VIDEO_PROMPT_NODE["value"]`; первый кадр через `upload_image` в
+   `COMFYUI_VIDEO_IMAGE_NODE["image"]`; аудио через `upload_audio` в
+   `COMFYUI_VIDEO_AUDIO_NODE["audio"]`.
+2. В `COMFYUI_VIDEO_DURATION_NODE["value"]` кладётся ровно `wav_duration_seconds(audio_path)`
+   (без округления).
+3. В выходной файл пишутся ровно байты `download_image`; путь — под `VIDEOS_DIR/clips` и
+   содержит `idea-<idea_id>-beat-<beat_id>`.
+4. Если за `timeout` результат не появился — `TimeoutError`, файл не пишется.
+
 ## Runnable-скрипт (`python -m app.services.comfyui`)
 `argparse`: `--workflow`, `--prompt`, `--prompt-node` (обязательные); `--out`, `--image`,
 `--image-node`, `--timeout` (опциональные, `--timeout` по умолчанию `DEFAULT_TIMEOUT`).
@@ -93,3 +148,12 @@
 - **generate_first_beat_image**: `patch` `generate_image` → вызван с `COMFYUI_WORKFLOW`,
   `COMFYUI_PROMPT_NODE`, `prompt_text == build_prompt_text(...)`, `output_path` под `IMAGES_DIR`
   и содержит `idea-7`; возврат пробрасывается.
+- **_first_output_file**: находит файл под `gifs`/`videos` (не только `images`); пустые
+  `outputs` → `None`.
+- **build_video_prompt_text**: для строки со всеми полями → части в порядке
+  `VIDEO_PROMPT_FIELDS` через ", "; пустые поля пропускаются.
+- **generate_beat_clip** (моки клиента, реальный мини-WAV, `VIDEOS_DIR`/`COMFYUI_VIDEO_WORKFLOW`
+  замоканы на `tmp_path`): промпт в prompt-ноде; `upload_image`(first_frame)+image-нода;
+  `upload_audio`(audio)+audio-нода; duration-нода == `wav_duration_seconds(audio)` (точно);
+  байты из `download_image` записаны под `VIDEOS_DIR/clips/...`, путь содержит
+  `idea-<id>-beat-<id>`; пустой `outputs` → `TimeoutError`, файл не пишется.

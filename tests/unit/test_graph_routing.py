@@ -18,6 +18,7 @@ from app.graph import (
     s10_generate_audio,
     s11_generate_beats,
     s12_video_prompts,
+    s13_generate_clips,
     select_target_step,
 )
 
@@ -881,15 +882,218 @@ def test_s12_video_prompts_skips_when_no_scenario():
     assert 12 in result["executed_steps"]
 
 
-# --- stub factory s13..s14 ---
+# --- s13_generate_clips ---
+
+
+_S13_SEGMENTS = [{"seg_id": 11}]
+_S13_BEATS = {11: [{"id": 102}, {"id": 101}]}  # неотсортированы; в порядке сценария → 101, 102
+_S13_AUDIO_BEATS = {101: [{"key": "beats/b101.wav"}], 102: [{"key": "beats/b102.wav"}]}
+_S13_VBP = {
+    101: [{"video_prompt": "vp1", "end_frame": "ef1"}],
+    102: [{"video_prompt": "vp2", "end_frame": "ef2"}],
+}
+_S13_FIRST_IMAGE = "assets/images/idea-7-first-beat.png"
+
+
+def _fetch_rows_for_s13(clips_for):
+    # clips_for(beat_id) -> существующие строки video_clips (для побитовой идемпотентности).
+    def fetch_rows(table, column, value):
+        if table == "scenarios":
+            return [{"id": 3}]
+        if table == "image_prompts":
+            return [{"id": 50}]
+        if table == "images":
+            return [{"key": _S13_FIRST_IMAGE}]
+        if table == "audio_seg_prompts":
+            return _S13_SEGMENTS
+        if table == "audio_beat_prompts":
+            return _S13_BEATS[value]
+        if table == "audio_beats":
+            return _S13_AUDIO_BEATS[value]
+        if table == "video_beat_prompts":
+            return _S13_VBP[value]
+        if table == "video_clips":
+            return clips_for(value)
+        return []
+
+    return fetch_rows
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_generates_chains_and_advances():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    # генерация по порядку id: бит 101, затем 102
+    assert [c.args[4] for c in gen.call_args_list] == [101, 102]
+    # первый бит стартует с картинки шага 8
+    assert gen.call_args_list[0].args[1] == _S13_FIRST_IMAGE
+    # вход бита 102 — последний кадр, извлечённый из клипа бита 101
+    assert gen.call_args_list[1].args[1] == frame.call_args_list[0].args[1]
+    # промпт строится через build_video_prompt_text; аудио — ключ бита
+    assert gen.call_args_list[0].args[0] == "vp1"
+    assert gen.call_args_list[0].args[2] == "beats/b101.wav"
+    assert ins.call_count == 2
+    assert frame.call_count == 2
+    upd.assert_called_once_with(7, "clips_generated")
+    assert result["pipeline_step"] == 14
+    assert 13 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_skips_existing_but_still_extracts_frame():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    clips = {101: [{"key": "clips/old-101.mp4"}], 102: []}  # 101 уже сгенерирован
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: clips[v])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    # сгенерирован только 102; 101 пропущен (клип уже есть)
+    assert [c.args[4] for c in gen.call_args_list] == [102]
+    ins.assert_called_once()
+    # последний кадр извлекается для ОБОИХ битов; для 101 — из существующего клипа на диске
+    assert frame.call_count == 2
+    assert frame.call_args_list[0].args[0] == "clips/old-101.mp4"
+    # вход 102 = кадр, извлечённый из клипа 101 (сцепка не рвётся)
+    assert gen.call_args_list[0].args[1] == frame.call_args_list[0].args[1]
+    upd.assert_called_once_with(7, "clips_generated")
+    assert result["pipeline_step"] == 14
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_skips_beats_without_prompt_or_audio():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    segments = [{"seg_id": 11}]
+    beats = {11: [{"id": 101}, {"id": 102}, {"id": 103}]}
+    vbp = {
+        101: [{"video_prompt": "vp1", "end_frame": "ef1"}],
+        102: [],
+        103: [{"video_prompt": "vp3"}],
+    }
+    audio = {101: [{"key": "b101.wav"}], 102: [], 103: []}  # 103 не озвучен
+
+    def fr(table, column, value):
+        if table == "scenarios":
+            return [{"id": 3}]
+        if table == "image_prompts":
+            return [{"id": 50}]
+        if table == "images":
+            return [{"key": _S13_FIRST_IMAGE}]
+        if table == "audio_seg_prompts":
+            return segments
+        if table == "audio_beat_prompts":
+            return beats[value]
+        if table == "video_beat_prompts":
+            return vbp[value]
+        if table == "audio_beats":
+            return audio[value]
+        if table == "video_clips":
+            return []
+        return []
+
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=fr),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    # генерируется только бит 101 (102 — нет промпта, 103 — нет аудио)
+    assert [c.args[4] for c in gen.call_args_list] == [101]
+    ins.assert_called_once()
+    assert frame.call_count == 1  # кадр извлекается только для сгенерированного клипа
+    upd.assert_called_once_with(7, "clips_generated")
+    assert result["pipeline_step"] == 14
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_advances_without_work_when_no_idea():
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value={"exists": False}),
+        patch("app.graph.generate_beat_clip") as gen,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    gen.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 14
+    assert 13 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_skips_when_no_first_image():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+
+    def fr(table, column, value):
+        if table == "scenarios":
+            return [{"id": 3}]
+        if table == "image_prompts":
+            return [{"id": 50}]
+        if table == "images":
+            return []  # нет картинки шага 8
+        return []
+
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=fr),
+        patch("app.graph.generate_beat_clip") as gen,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    gen.assert_not_called()
+    upd.assert_not_called()  # статус НЕ меняется без стартового кадра
+    assert result["pipeline_step"] == 14
+    assert 13 in result["executed_steps"]
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_skips_when_no_scenario():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", return_value=[]),  # нет сценария
+        patch("app.graph.generate_beat_clip") as gen,
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    gen.assert_not_called()
+    upd.assert_not_called()
+    assert result["pipeline_step"] == 14
+    assert 13 in result["executed_steps"]
+
+
+# --- stub factory s14 ---
 
 
 @pytest.mark.unit
 def test_make_stub_prints_and_advances(capsys):
-    stub = _make_stub(13)
+    stub = _make_stub(14)
     with patch("app.graph.fetch_idea_by_status", return_value={"idea_name": "X", "exists": True}):
         result = stub({})
 
-    assert result["pipeline_step"] == 14
-    assert 13 in result["executed_steps"]
-    assert "STATE 13" in capsys.readouterr().out
+    assert result["pipeline_step"] == 15
+    assert 14 in result["executed_steps"]
+    assert "STATE 14" in capsys.readouterr().out

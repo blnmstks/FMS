@@ -29,6 +29,14 @@ def wav_duration_ms(path: str) -> float:
     return len(AudioSegment.from_file(path))
 
 
+def wav_duration_seconds(path: str) -> float:
+    # Сэмпл-точная длина WAV в секундах из заголовка: nframes / framerate. Без округления и без
+    # pydub (wav_duration_ms квантуется до целых мс). Шаг 13 задаёт длину видео ровно по реальной
+    # длине поданного аудиобита — иначе видео и звук рассинхронизируются.
+    with wave.open(path, "rb") as wf:
+        return wf.getnframes() / wf.getframerate()
+
+
 def slice_wav(input_path: str, output_path: str, start_ms: float, end_ms: float) -> str:
     # Вырезает фрагмент [start_ms:end_ms] из input_path и пишет его в output_path форматом wav,
     # создавая родительские директории. Возвращает output_path. (Как в slice_segment.py — pydub.)

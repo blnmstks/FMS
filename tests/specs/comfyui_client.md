@@ -17,6 +17,18 @@
 2. Файл передаётся в `files={"image": (...)}`.
 3. Возвращает `response.json()` (dict), не модифицирует его.
 
+## `upload_audio(audio_path: str) -> dict`
+
+### Contract
+То же, что `upload_image`, но для аудиофайла: `/upload/image` — общий input-upload ComfyUI,
+принимает любой файл в input-каталог (нода LoadAudio затем берёт его по имени). Поле формы —
+тоже `image` (имя поля эндпоинта, не тип медиа). Возвращает `{"name", "subfolder", "type"}`.
+`upload_image`/`upload_audio` делят единственную транспортную реализацию.
+
+### Invariants
+1. URL = `{COMFYUI_URL}/upload/image`, метод POST, файл в `files={"image": (...)}`.
+2. Возвращает `response.json()` (dict).
+
 ## `queue_prompt(workflow: dict, client_id: str) -> str`
 
 ### Contract
@@ -56,6 +68,8 @@
 ## Test cases (unit, `requests` замокан)
 - **upload_image**: дергает POST `/upload/image`, в `files` есть ключ `image`; возвращает
   dict из `response.json()`.
+- **upload_audio**: дергает POST `/upload/image` (тот же эндпоинт), в `files` есть ключ
+  `image`; возвращает dict из `response.json()`.
 - **queue_prompt**: POST `/prompt` с `json={"prompt": <wf>, "client_id": "abc"}`; возвращает
   `"pid-1"` из `{"prompt_id": "pid-1"}`.
 - **get_history**: GET `/history/pid-1`; возвращает тело ответа как dict.

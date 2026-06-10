@@ -4,7 +4,7 @@
 статус → шаг линейное (из `IDEAS_STATUSES`): `raw_idea→5`, `scenario_finished→6`,
 `clips_visual_style_finished→7`, `image_prompt_finished→8`, `image_generated→9`,
 `audio_prompts_finished→10`, `audio_generated→11`, `audio_beats_generated→12`,
-`video_prompts_finished→13`, `video_done→14`.
+`video_prompts_finished→13`, `clips_generated→14`.
 
 ## `STEP_BY_STATUS`
 Словарь `{status: 5 + index}` из `IDEAS_STATUSES` (единственный источник истины — порядок
@@ -345,13 +345,47 @@
   `pipeline_step == 13`, `12 in executed_steps`; `interrupt` не вызван
 - нет сценария (`fetch_rows`→`[]`): генерация/запись/смена статуса не вызваны; advance
 
-## Стабы шагов 13–14 — фабрика `_make_stub(n)`
+## `s13_generate_clips(state)` — шаг 13
+Берёт идею со статусом `video_prompts_finished` и генерирует видео-клип на КАЖДЫЙ озвученный
+бит через ComfyUI (LTX-2.3, сервис `generate_beat_clip`), сцепляя клипы по последнему кадру.
+Самодостаточный, полностью автоматический (без `interrupt`). Статус → `clips_generated` строго
+ПОСЛЕ успешной генерации и записи всех клипов.
+
+Логика:
+- идеи нет → `_advance(state, 13)`;
+- нет сценария (`fetch_rows("scenarios", "idea", …)`→`[]`) → advance без смены статуса;
+- стартовый кадр первого клипа — картинка шага 8 (`images.key`, цепочка scenario →
+  `image_prompts` → `images`). Нет картинки → лог и advance БЕЗ смены статуса;
+- биты собираются в порядке сценария (как в s12: по `audio_seg_prompts` → `audio_beat_prompts`,
+  затем `sort` по `id`);
+- `prev_frame = images[0]["key"]`; по каждому биту по порядку:
+  - нет `video_beat_prompts` для бита → `continue`; нет `audio_beats` (силент-бит) → `continue`;
+  - если в `video_clips` уже есть строка бита → `clip_path = key`, `skipped++` (не перегенерируем);
+    иначе `clip_path = generate_beat_clip(build_video_prompt_text(vbp), prev_frame,
+    audio_beats.key, idea_id, beat_id)`, затем `insert_video_clip("local", clip_path, "clip",
+    beat_id)`, `generated++`;
+  - `prev_frame = extract_last_frame(clip_path, VIDEOS_DIR/frames/idea-<id>-beat-<id>-last.png)`
+    (последний кадр извлекается и для пропущенных клипов — сцепка не рвётся на resume);
+- `update_idea_status(idea_id, "clips_generated")`; `_advance(state, 13, {idea_id, idea_name})`.
+
+### Test cases
+- генерирует по порядку (101, 102), первый бит стартует с картинки шага 8, вход бита 102 — кадр,
+  извлечённый из клипа 101; `insert_video_clip` на каждый, статус `clips_generated`,
+  `pipeline_step == 14`, `13 in executed_steps`
+- идемпотентность: бит с существующим `video_clips` не идёт в `generate_beat_clip`/
+  `insert_video_clip`, но `extract_last_frame` для него вызывается (из `key` существующего клипа)
+- биты без `video_beat_prompts` или без `audio_beats` пропускаются
+- идеи нет / нет сценария / нет картинки шага 8 → `generate_beat_clip`/`update_idea_status` не
+  вызваны, advance на шаг 14
+- `interrupt` не вызывается (узел автоматический)
+
+## Стаб шага 14 — фабрика `_make_stub(n)`
 Возвращает узел `stub(state)`: печатает `STATE {n} — (заглушка) ...` (имя идеи берёт через
 `fetch_idea_by_status(IDEAS_STATUSES[n-5])`) и возвращает `_advance(state, n)`.
 
 ### Test cases
-- `_make_stub(13)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 14`,
-  `13 in executed_steps`; в stdout `STATE 13`
+- `_make_stub(14)(state)` (мок `fetch_idea_by_status`): результат `pipeline_step == 15`,
+  `14 in executed_steps`; в stdout `STATE 14`
 
 ## Поток графа
 ```

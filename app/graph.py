@@ -1,7 +1,7 @@
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.config import VAULT_PATH
+from app.config import VAULT_PATH, VIDEOS_DIR
 from app.db import (
     IDEAS_STATUSES,
     STYLE_FIELDS,
@@ -20,6 +20,7 @@ from app.db import (
     insert_image,
     insert_image_prompt,
     insert_scenario,
+    insert_video_clip,
     replace_audio_prompts,
     replace_video_prompts,
     update_idea_status,
@@ -29,7 +30,11 @@ from app.services.audio_beats import slice_segment_beats
 from app.services.audio_prompts import generate_audio_prompts
 from app.services.audio_tts import generate_segment_audio
 from app.services.branding import analyze_channel
-from app.services.comfyui import generate_first_beat_image
+from app.services.comfyui import (
+    build_video_prompt_text,
+    generate_beat_clip,
+    generate_first_beat_image,
+)
 from app.services.ideas import generate_video_ideas
 from app.services.image_prompts import generate_image_prompt
 from app.services.scenarios import generate_scenario
@@ -38,6 +43,7 @@ from app.services.video_prompts import generate_video_prompts
 from app.services.visual_styles import generate_visual_style
 from app.state import ProjectState
 from app.utils.files import read_from_vault, read_text_file, save_to_vault
+from app.utils.video import extract_last_frame
 
 
 def s1_channel(state: ProjectState) -> dict:
@@ -237,7 +243,7 @@ def s4_pick(state: ProjectState) -> dict:
 
 # --- Диспетчер шагов 5+: соответствие статус→шаг и выбор целевого шага ---
 
-# Источник истины для соответствия — порядок IDEAS_STATUSES: raw_idea→5 … video_done→13.
+# Источник истины для соответствия — порядок IDEAS_STATUSES: raw_idea→5 … video_prompts_finished→13, clips_generated→14.
 STEP_BY_STATUS = {status: 5 + i for i, status in enumerate(IDEAS_STATUSES)}
 FIRST_STEP = 5
 
@@ -600,8 +606,81 @@ def s12_video_prompts(state: ProjectState) -> dict:
     return _advance(state, 12, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def s13_generate_clips(state: ProjectState) -> dict:
+    # Шаг 13: по idea со статусом video_prompts_finished генерирует видео-клип на КАЖДЫЙ озвученный
+    # бит через ComfyUI (LTX-2.3), сцепляя клипы по последнему кадру: первый бит стартует с картинки
+    # шага 8, каждый следующий — с последнего кадра предыдущего клипа (ffmpeg). Длина клипа = точная
+    # длина WAV бита (её меряет сервис). Регистрирует клипы в video_clips и переводит идею в
+    # clips_generated. Узел самодостаточный, полностью автоматический (без interrupt).
+    # Побитовая идемпотентность: бит с уже существующим клипом не перегенерируется, но его последний
+    # кадр всё равно извлекается — сцепка не рвётся на повторном/прерванном прогоне. Статус меняется
+    # ТОЛЬКО после успешной генерации и записи: при ошибке исключение пробрасывается, курсор не двигается.
+    idea = fetch_idea_by_status("video_prompts_finished")
+    if not idea.get("exists"):
+        return _advance(state, 13)
+
+    idea_id = idea["idea_id"]
+    idea_name = idea["idea_name"]
+
+    scenario_row = (fetch_rows("scenarios", "idea", idea_id) or [{}])[0]
+    scenario_id = scenario_row.get("id")
+    if scenario_id is None:
+        return _advance(state, 13, {"idea_id": idea_id, "idea_name": idea_name})
+
+    # Стартовый кадр первого клипа — картинка первого бита (шаг 8).
+    image_prompt_row = (fetch_rows("image_prompts", "scenario", scenario_id) or [{}])[0]
+    image_prompt_id = image_prompt_row.get("id")
+    images = fetch_rows("images", "image_prompt", image_prompt_id) if image_prompt_id else []
+    if not images:
+        print(f"\nSTATE 13 — no first-beat image for idea: {idea_name}, skipping")
+        return _advance(state, 13, {"idea_id": idea_id, "idea_name": idea_name})
+    prev_frame = images[0]["key"]
+
+    # Биты в порядке сценария (как в s12): по сегментам, затем сортировка по id.
+    segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id)
+    beats: list[dict] = []
+    for seg in segments:
+        beats.extend(fetch_rows("audio_beat_prompts", "seg_id", seg["seg_id"]))
+    beats.sort(key=lambda b: b["id"])
+
+    print(f"\nSTATE 13 — generating video clips for idea: {idea_name} ({len(beats)} beat(s))")
+    generated = skipped = 0
+    for b in beats:
+        video_prompt = fetch_rows("video_beat_prompts", "beat", b["id"])
+        if not video_prompt:  # нет видео-промпта на бит
+            continue
+        audio_beat = fetch_rows("audio_beats", "beat", b["id"])
+        if not audio_beat:  # бит не озвучен (нет WAV) — клип не генерируем
+            continue
+        existing = fetch_rows("video_clips", "beat", b["id"])
+        if existing:  # клип уже сгенерирован — не перегенерируем
+            clip_path = existing[0]["key"]
+            skipped += 1
+        else:
+            clip_path = generate_beat_clip(
+                build_video_prompt_text(video_prompt[0]),
+                prev_frame,
+                audio_beat[0]["key"],
+                idea_id,
+                b["id"],
+            )
+            insert_video_clip("local", clip_path, "clip", b["id"])
+            generated += 1
+        # Последний кадр текущего клипа — вход следующего (и для пропущенных: сцепка не рвётся).
+        prev_frame = extract_last_frame(
+            clip_path, f"{VIDEOS_DIR}/frames/idea-{idea_id}-beat-{b['id']}-last.png"
+        )
+
+    update_idea_status(idea_id, "clips_generated")
+    print(
+        f"STATE 13 — clips ready, idea marked clips_generated: {idea_name} "
+        f"(generated {generated}, skipped {skipped} existing)"
+    )
+    return _advance(state, 13, {"idea_id": idea_id, "idea_name": idea_name})
+
+
 def _make_stub(n: int):
-    # Фабрика узлов-заглушек для шагов 13..14: печатает плейсхолдер и продвигает курсор.
+    # Фабрика узлов-заглушек для шага 14: печатает плейсхолдер и продвигает курсор.
     status = IDEAS_STATUSES[n - 5]
 
     def stub(state: ProjectState) -> dict:
@@ -649,7 +728,8 @@ g.add_node("s9", s9_audio_prompts)
 g.add_node("s10", s10_generate_audio)
 g.add_node("s11", s11_generate_beats)
 g.add_node("s12", s12_video_prompts)
-for _n in range(13, 15):  # шаги 13..14 — заглушки из фабрики
+g.add_node("s13", s13_generate_clips)
+for _n in range(14, 15):  # шаг 14 — заглушка из фабрики
     g.add_node(f"s{_n}", _make_stub(_n))
 
 g.add_edge(START, "s1")

@@ -181,3 +181,147 @@ def test_generate_image_times_out_when_no_outputs(tmp_path, mock_client):
             generate_image(wf_path, "a red fox", "6", str(out), poll_interval=0, timeout=0.01)
 
     assert not out.exists()
+
+
+# --- видео-клип (шаг 13) ---
+
+
+@pytest.mark.unit
+def test_first_output_file_finds_non_image_keys():
+    from app.services.comfyui import _first_output_file
+
+    outputs = {"n": {"gifs": [{"filename": "c.mp4", "subfolder": "", "type": "output"}]}}
+
+    assert _first_output_file(outputs) == {"filename": "c.mp4", "subfolder": "", "type": "output"}
+
+
+@pytest.mark.unit
+def test_first_output_file_returns_none_when_no_files():
+    from app.services.comfyui import _first_output_file
+
+    assert _first_output_file({"n": {"text": ["x"]}}) is None
+
+
+@pytest.mark.unit
+def test_build_video_prompt_text_joins_fields_in_order():
+    from app.db import VIDEO_PROMPT_FIELDS
+    from app.services.comfyui import build_video_prompt_text
+
+    row = {f: f"v_{f}" for f in VIDEO_PROMPT_FIELDS}
+    row["id"] = 3  # лишние ключи строки БД игнорируются
+    row["beat"] = 9
+
+    assert build_video_prompt_text(row) == ", ".join(f"v_{f}" for f in VIDEO_PROMPT_FIELDS)
+
+
+@pytest.mark.unit
+def test_build_video_prompt_text_skips_empty_fields():
+    from app.services.comfyui import build_video_prompt_text
+
+    assert build_video_prompt_text({"video_prompt": "pan left", "end_frame": ""}) == "pan left"
+
+
+def _write_video_workflow(tmp_path):
+    from app.config import (
+        COMFYUI_VIDEO_AUDIO_NODE,
+        COMFYUI_VIDEO_DURATION_NODE,
+        COMFYUI_VIDEO_IMAGE_NODE,
+        COMFYUI_VIDEO_PROMPT_NODE,
+    )
+
+    wf = {
+        COMFYUI_VIDEO_PROMPT_NODE: {
+            "class_type": "PrimitiveStringMultiline",
+            "inputs": {"value": ""},
+        },
+        COMFYUI_VIDEO_IMAGE_NODE: {"class_type": "LoadImage", "inputs": {"image": ""}},
+        COMFYUI_VIDEO_AUDIO_NODE: {"class_type": "LoadAudio", "inputs": {"audio": ""}},
+        COMFYUI_VIDEO_DURATION_NODE: {"class_type": "PrimitiveFloat", "inputs": {"value": 0.0}},
+        "out": {"class_type": "SaveVideo", "inputs": {}},
+    }
+    path = tmp_path / "video_wf.json"
+    path.write_text(json.dumps(wf), encoding="utf-8")
+    return str(path)
+
+
+@pytest.fixture
+def mock_video_client():
+    """Patch comfyui_client functions used by generate_beat_clip (вывод видео — под ключом gifs)."""
+    with (
+        patch("app.services.comfyui.upload_image") as upload_img,
+        patch("app.services.comfyui.upload_audio") as upload_aud,
+        patch("app.services.comfyui.queue_prompt") as queue,
+        patch("app.services.comfyui.get_history") as history,
+        patch("app.services.comfyui.download_image") as download,
+    ):
+        queue.return_value = "vid-1"
+        history.return_value = {
+            "vid-1": {
+                "outputs": {
+                    "out": {"gifs": [{"filename": "clip.mp4", "subfolder": "", "type": "output"}]}
+                }
+            }
+        }
+        download.return_value = b"VIDDATA"
+        upload_img.return_value = {"name": "frame.png", "subfolder": "", "type": "input"}
+        upload_aud.return_value = {"name": "beat.wav", "subfolder": "", "type": "input"}
+        yield {
+            "upload_image": upload_img,
+            "upload_audio": upload_aud,
+            "queue": queue,
+            "history": history,
+            "download": download,
+        }
+
+
+@pytest.mark.unit
+def test_generate_beat_clip_injects_inputs_and_saves(tmp_path, mock_video_client):
+    from app.config import (
+        COMFYUI_VIDEO_AUDIO_NODE,
+        COMFYUI_VIDEO_DURATION_NODE,
+        COMFYUI_VIDEO_IMAGE_NODE,
+        COMFYUI_VIDEO_PROMPT_NODE,
+    )
+    from app.services.comfyui import generate_beat_clip
+    from app.utils.audio import write_wav
+
+    wf_path = _write_video_workflow(tmp_path)
+    audio = write_wav(b"\x00\x00" * 36000, str(tmp_path / "beat.wav"))  # 1.5 c @ 24000 Hz
+
+    with (
+        patch("app.services.comfyui.COMFYUI_VIDEO_WORKFLOW", wf_path),
+        patch("app.services.comfyui.VIDEOS_DIR", str(tmp_path / "vid")),
+    ):
+        result = generate_beat_clip("a clip, wide ending", "frame_in.png", audio, 7, 42)
+
+    mock_video_client["upload_image"].assert_called_once_with("frame_in.png")
+    mock_video_client["upload_audio"].assert_called_once_with(audio)
+    sent = mock_video_client["queue"].call_args.args[0]
+    assert sent[COMFYUI_VIDEO_PROMPT_NODE]["inputs"]["value"] == "a clip, wide ending"
+    assert sent[COMFYUI_VIDEO_IMAGE_NODE]["inputs"]["image"] == "frame.png"
+    assert sent[COMFYUI_VIDEO_AUDIO_NODE]["inputs"]["audio"] == "beat.wav"
+    assert sent[COMFYUI_VIDEO_DURATION_NODE]["inputs"]["value"] == 1.5  # точно, без округления
+
+    assert result.startswith(str(tmp_path / "vid" / "clips"))
+    assert "idea-7-beat-42" in result
+    assert Path(result).read_bytes() == b"VIDDATA"
+
+
+@pytest.mark.unit
+def test_generate_beat_clip_times_out_when_no_outputs(tmp_path, mock_video_client):
+    from app.services.comfyui import generate_beat_clip
+    from app.utils.audio import write_wav
+
+    wf_path = _write_video_workflow(tmp_path)
+    audio = write_wav(b"\x00\x00" * 2400, str(tmp_path / "beat.wav"))
+    mock_video_client["history"].return_value = {}  # никогда не готово
+
+    with (
+        patch("app.services.comfyui.COMFYUI_VIDEO_WORKFLOW", wf_path),
+        patch("app.services.comfyui.VIDEOS_DIR", str(tmp_path / "vid")),
+        patch("app.services.comfyui.time.sleep"),
+    ):
+        with pytest.raises(TimeoutError):
+            generate_beat_clip("p", "f.png", audio, 7, 42, poll_interval=0, timeout=0.01)
+
+    assert not (tmp_path / "vid" / "clips").exists()

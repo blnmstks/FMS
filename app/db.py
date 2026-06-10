@@ -17,7 +17,7 @@ IDEAS_STATUSES = [
     "audio_generated",
     "audio_beats_generated",
     "video_prompts_finished",
-    "video_done",
+    "clips_generated",
 ]
 
 STYLE_FIELDS = [
@@ -77,6 +77,7 @@ RELATION_EDGES = [
     ("audio_seg_prompts", "scenario", "scenarios"),
     ("audio_beats", "beat", "audio_beat_prompts"),
     ("video_beat_prompts", "beat", "audio_beat_prompts"),
+    ("video_clips", "beat", "audio_beat_prompts"),
 ]
 
 
@@ -495,6 +496,39 @@ def replace_video_prompts(beats: list[dict], scenario_id: int) -> None:
                     "VALUES (%s, %s, %s)",
                     (beat.get("id"), beat.get("video_prompt"), beat.get("end_frame")),
                 )
+        conn.commit()
+
+
+def migrate_video_clips_table() -> None:
+    # Идемпотентно создаёт таблицу video_clips — реестр сгенерированных видео-клипов (шаг 13), по
+    # образцу audio_beats/images: storage-agnostic ключ key + маркер бэкенда storage. beat — FK на
+    # audio_beat_prompts(id); created_at заполняет БД. Запускать после migrate_audio_beat_prompts_table.
+    # Таблица входит в RELATION_EDGES (родитель audio_beat_prompts имеет PK id). Безопасно многократно.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS video_clips (
+                    id SERIAL PRIMARY KEY,
+                    storage TEXT NOT NULL DEFAULT 'local',
+                    key TEXT NOT NULL,
+                    role TEXT,
+                    beat INTEGER REFERENCES audio_beat_prompts(id),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+            """)
+        conn.commit()
+
+
+def insert_video_clip(storage: str, key: str, role: str, beat_id: int) -> None:
+    # Регистрирует сгенерированный видео-клип, связывая его с audio_beat_prompts. Каждый вызов —
+    # новая строка. created_at не передаётся — её заполняет БД (DEFAULT now()). Аргументы явные,
+    # без дефолтов: знание storage=local/role=clip — бизнес-логика узла, а не слоя БД.
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO video_clips (storage, key, role, beat) VALUES (%s, %s, %s, %s)",
+                (storage, key, role, beat_id),
+            )
         conn.commit()
 
 

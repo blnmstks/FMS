@@ -67,6 +67,29 @@ def test_wav_duration_ms_returns_length(tmp_path):
     assert abs(wav_duration_ms(src) - 1000) <= 10
 
 
+# --- wav_duration_seconds ---
+
+
+@pytest.mark.unit
+def test_wav_duration_seconds_is_exact(tmp_path):
+    from app.utils.audio import wav_duration_seconds, write_wav
+
+    # 36000 кадров @ 24000 Hz = ровно 1.5 с (mono, 16-bit → 2 байта/кадр).
+    src = write_wav(b"\x00\x00" * 36000, str(tmp_path / "src.wav"))
+
+    assert wav_duration_seconds(src) == 1.5
+
+
+@pytest.mark.unit
+def test_wav_duration_seconds_not_rounded_to_ms(tmp_path):
+    from app.utils.audio import wav_duration_seconds, write_wav
+
+    # 24001 кадр @ 24000 Hz — нецелое число мс; результат точный, без округления до мс.
+    src = write_wav(b"\x00\x00" * 24001, str(tmp_path / "src.wav"))
+
+    assert wav_duration_seconds(src) == 24001 / 24000
+
+
 # --- slice_wav ---
 
 

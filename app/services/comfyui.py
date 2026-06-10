@@ -2,19 +2,35 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from app.config import COMFYUI_IMAGE_PROMPT_NODE, COMFYUI_IMAGE_WORKFLOW, IMAGES_DIR
-from app.db import IMAGE_PROMPT_FIELDS
+from app.config import (
+    COMFYUI_IMAGE_PROMPT_NODE,
+    COMFYUI_IMAGE_WORKFLOW,
+    COMFYUI_VIDEO_AUDIO_NODE,
+    COMFYUI_VIDEO_DURATION_NODE,
+    COMFYUI_VIDEO_IMAGE_NODE,
+    COMFYUI_VIDEO_PROMPT_NODE,
+    COMFYUI_VIDEO_WORKFLOW,
+    IMAGES_DIR,
+    VIDEOS_DIR,
+)
+from app.db import IMAGE_PROMPT_FIELDS, VIDEO_PROMPT_FIELDS
 from app.infrastructure.comfyui_client import (
     download_image,
     get_history,
     queue_prompt,
+    upload_audio,
     upload_image,
 )
+from app.utils.audio import wav_duration_seconds
 from app.utils.workflow import load_workflow, set_node_input
 
 # Дефолт под медленные модели (Flux: загрузка модели + сэмплинг легко дольше 30с).
 # Слишком короткий таймаут → TimeoutError до скачивания, и копия в проект не пишется.
 DEFAULT_TIMEOUT = 300.0
+# Видео медленнее картинки (LTX-2.3: загрузка + сэмплинг + апскейл).
+DEFAULT_VIDEO_TIMEOUT = 1800.0
+# Ключи, под которыми ComfyUI кладёт выходные файлы в history (SaveImage→images, SaveVideo→иной).
+_OUTPUT_FILE_KEYS = ("images", "gifs", "videos")
 
 
 def generate_image(
@@ -38,7 +54,7 @@ def generate_image(
         set_node_input(workflow, image_node_id, "image", name)
 
     prompt_id = queue_prompt(workflow, uuid4().hex)
-    image_info = _wait_for_image(prompt_id, poll_interval, timeout)
+    image_info = _wait_for_output(prompt_id, poll_interval, timeout)
 
     data = download_image(image_info["filename"], image_info["subfolder"], image_info["type"])
     out = Path(output_path)
@@ -47,18 +63,28 @@ def generate_image(
     return output_path
 
 
-def _wait_for_image(prompt_id: str, poll_interval: float, timeout: float) -> dict:
-    # Опрашивает /history, пока не появятся outputs, и возвращает первое изображение
+def _first_output_file(outputs: dict) -> dict | None:
+    # Первый выходной файл из outputs нод по любому из _OUTPUT_FILE_KEYS ({filename, subfolder,
+    # type}). Нода SaveVideo кладёт результат под ключ, отличный от images. Нет файлов → None.
+    for node_output in outputs.values():
+        for key in _OUTPUT_FILE_KEYS:
+            files = node_output.get(key)
+            if files:
+                return files[0]
+    return None
+
+
+def _wait_for_output(prompt_id: str, poll_interval: float, timeout: float) -> dict:
+    # Опрашивает /history, пока не появится первый выходной файл (image/video), и возвращает его
     # ({filename, subfolder, type}). По истечении timeout бросает TimeoutError.
     deadline = time.monotonic() + timeout
     while True:
         history = get_history(prompt_id)
         outputs = history.get(prompt_id, {}).get("outputs")
         if outputs:
-            for node_output in outputs.values():
-                images = node_output.get("images")
-                if images:
-                    return images[0]
+            found = _first_output_file(outputs)
+            if found:
+                return found
         if time.monotonic() >= deadline:
             raise TimeoutError(f"ComfyUI prompt {prompt_id} did not finish within {timeout}s")
         time.sleep(poll_interval)
@@ -89,6 +115,52 @@ def generate_first_beat_image(image_prompt: dict, idea_id: int) -> str:
     name = f"idea-{idea_id}-first-beat-{time.strftime('%Y%m%d-%H%M%S')}.png"
     out = resolve_output_path(name, COMFYUI_IMAGE_WORKFLOW, IMAGES_DIR)
     return generate_image(COMFYUI_IMAGE_WORKFLOW, prompt_text, COMFYUI_IMAGE_PROMPT_NODE, out)
+
+
+def build_video_prompt_text(video_beat_prompt: dict) -> str:
+    # Объединяет непустые поля видео-промпта бита в порядке VIDEO_PROMPT_FIELDS через ", "
+    # (как build_prompt_text). Лишние ключи строки БД (id/beat) игнорируются. Изолирована
+    # намеренно — точная «сцепка» промпта будет дорабатываться.
+    parts = [
+        str(video_beat_prompt[f]).strip() for f in VIDEO_PROMPT_FIELDS if video_beat_prompt.get(f)
+    ]
+    return ", ".join(parts)
+
+
+def generate_beat_clip(
+    prompt_text: str,
+    first_frame_path: str,
+    audio_path: str,
+    idea_id: int,
+    beat_id: int,
+    poll_interval: float = 1.0,
+    timeout: float = DEFAULT_VIDEO_TIMEOUT,
+) -> str:
+    # Бизнес-логика шага 13: генерирует видео-клип одного бита через ComfyUI (workflow/ноды из
+    # конфига). Подаёт промпт, первый кадр (заливка через upload_image), аудиобит (upload_audio)
+    # и его ТОЧНУЮ длину из самого файла (длина видео = длина аудио, без рассинхрона). Сохраняет
+    # результат под VIDEOS_DIR/clips (расширение — из имени файла ComfyUI, иначе .mp4). Путь.
+    workflow = load_workflow(COMFYUI_VIDEO_WORKFLOW)
+    set_node_input(workflow, COMFYUI_VIDEO_PROMPT_NODE, "value", prompt_text)
+
+    frame_name = upload_image(first_frame_path)["name"]
+    set_node_input(workflow, COMFYUI_VIDEO_IMAGE_NODE, "image", frame_name)
+
+    audio_name = upload_audio(audio_path)["name"]
+    set_node_input(workflow, COMFYUI_VIDEO_AUDIO_NODE, "audio", audio_name)
+
+    set_node_input(workflow, COMFYUI_VIDEO_DURATION_NODE, "value", wav_duration_seconds(audio_path))
+
+    prompt_id = queue_prompt(workflow, uuid4().hex)
+    clip_info = _wait_for_output(prompt_id, poll_interval, timeout)
+
+    data = download_image(clip_info["filename"], clip_info["subfolder"], clip_info["type"])
+    ext = Path(clip_info["filename"]).suffix or ".mp4"
+    name = f"idea-{idea_id}-beat-{beat_id}-{time.strftime('%Y%m%d-%H%M%S')}{ext}"
+    out = Path(VIDEOS_DIR) / "clips" / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    return str(out)
 
 
 def _main() -> None:

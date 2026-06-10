@@ -251,7 +251,7 @@ def test_dispatch_helpers_round_trip(pg_container, monkeypatch):
     assert found["exists"] is True
     assert found["idea_name"] == "Idea B"
 
-    assert db.fetch_idea_by_status("video_done") == {"exists": False}
+    assert db.fetch_idea_by_status("clips_generated") == {"exists": False}
 
 
 @pytest.mark.integration
@@ -564,6 +564,57 @@ def test_insert_and_delete_audio_beats_round_trip(pg_container, monkeypatch):
             "SELECT count(*) FROM audio_beats WHERE beat = %s", (beat_id,)
         ).fetchone()[0]
     assert remaining == 0
+
+
+@pytest.mark.integration
+def test_insert_video_clip_links_to_beat_round_trip(pg_container, monkeypatch):
+    monkeypatch.setenv("DB_URL", pg_container)
+    import importlib
+
+    import app.config as cfg
+
+    importlib.reload(cfg)
+    import app.db as db
+
+    importlib.reload(db)
+
+    db.migrate_ideas_table()
+    db.migrate_scenarios_table()
+    db.migrate_audio_seg_prompts_table()
+    db.migrate_audio_beat_prompts_table()
+    db.migrate_video_clips_table()
+
+    db.insert_idea("Idea for video clips", "video_prompts_finished")
+    idea_id = db.fetch_idea_by_status("video_prompts_finished")["idea_id"]
+    db.insert_scenario("A scenario for video clips.", idea_id)
+
+    with psycopg.connect(pg_container) as conn:
+        scenario_id = conn.execute(
+            "SELECT id FROM scenarios WHERE idea = %s", (idea_id,)
+        ).fetchone()[0]
+        seg_id = conn.execute(
+            "INSERT INTO audio_seg_prompts (speaker, emotion, tts_text, beat_ids, scenario) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING seg_id",
+            ("Narrator", "calm", "Hello world.", [1], scenario_id),
+        ).fetchone()[0]
+        beat_id = conn.execute(
+            "INSERT INTO audio_beat_prompts (seg_id, audio_text) VALUES (%s, %s) RETURNING id",
+            (seg_id, "First beat line."),
+        ).fetchone()[0]
+        conn.commit()
+
+    key = f"clips/idea-{idea_id}-beat-{beat_id}-ts.mp4"
+    db.insert_video_clip("local", key, "clip", beat_id)
+
+    # round-trip через тот же fetch_rows, что использует идемпотентность шага 13
+    rows = db.fetch_rows("video_clips", "beat", beat_id)
+    assert len(rows) == 1
+    assert (rows[0]["storage"], rows[0]["key"], rows[0]["role"], rows[0]["beat"]) == (
+        "local",
+        key,
+        "clip",
+        beat_id,
+    )
 
 
 @pytest.mark.integration

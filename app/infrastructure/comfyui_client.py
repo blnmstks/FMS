@@ -5,10 +5,10 @@ import requests
 from app.config import COMFYUI_URL
 
 
-def upload_image(image_path: str) -> dict:
-    # Заливает локальный файл в ComfyUI как multipart (поле "image").
-    # Возвращает распарсенный JSON {name, subfolder, type}.
-    p = Path(image_path)
+def _upload_input_file(file_path: str) -> dict:
+    # Заливает локальный файл в input-каталог ComfyUI как multipart (поле "image" — имя поля
+    # эндпоинта, не тип медиа; /upload/image принимает любой файл). {name, subfolder, type}.
+    p = Path(file_path)
     with p.open("rb") as f:
         response = requests.post(
             f"{COMFYUI_URL}/upload/image",
@@ -16,6 +16,17 @@ def upload_image(image_path: str) -> dict:
         )
     response.raise_for_status()
     return response.json()
+
+
+def upload_image(image_path: str) -> dict:
+    # Заливает изображение в ComfyUI. Возвращает распарсенный JSON {name, subfolder, type}.
+    return _upload_input_file(image_path)
+
+
+def upload_audio(audio_path: str) -> dict:
+    # Заливает аудиофайл тем же /upload/image (общий input-upload; LoadAudio берёт файл по имени).
+    # Возвращает распарсенный JSON {name, subfolder, type}.
+    return _upload_input_file(audio_path)
 
 
 def queue_prompt(workflow: dict, client_id: str) -> str:

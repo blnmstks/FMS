@@ -16,6 +16,7 @@ from app.db import (
     migrate_images_table,
     migrate_scenarios_table,
     migrate_video_beat_prompts_table,
+    migrate_video_clips_table,
     migrate_visual_styles_table,
     upsert_channel_info,
     upsert_channel_style_info,
@@ -39,6 +40,7 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
     migrate_audio_table()
     migrate_audio_beats_table()
     migrate_video_beat_prompts_table()
+    migrate_video_clips_table()
     app = build_app(checkpointer)
 
     initial_state = fetch_channel_info()
@@ -49,7 +51,9 @@ with PostgresSaver.from_conn_string(DB_URL) as checkpointer:
         result = (
             {"__interrupt__": interrupted}
             if interrupted
-            else app.invoke(Command(resume=None), config)
+            # langgraph 1.2.4: Command(resume=None) падает (UnboundLocalError resume_is_map).
+            # Идиоматичное «продолжить с чекпоинта» (в т.ч. дорезюм упавшего узла) — input=None.
+            else app.invoke(None, config)
         )
     else:
         result = app.invoke(initial_state, config)

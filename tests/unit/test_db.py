@@ -1167,11 +1167,18 @@ def test_ideas_statuses_audio_beats_replaces_clips_generated():
 
 
 @pytest.mark.unit
-def test_ideas_statuses_video_prompts_finished_before_video_done():
-    # video_prompts_finished (шаг 12) вставлен между audio_beats_generated и video_done.
+def test_ideas_statuses_video_prompts_finished_before_clips_generated():
+    # video_prompts_finished (шаг 12) → clips_generated (шаг 13, финал генерации клипов).
     i = IDEAS_STATUSES.index("video_prompts_finished")
     assert IDEAS_STATUSES[i - 1] == "audio_beats_generated"
-    assert IDEAS_STATUSES[i + 1] == "video_done"
+    assert IDEAS_STATUSES[i + 1] == "clips_generated"
+
+
+@pytest.mark.unit
+def test_ideas_statuses_clips_generated_is_last():
+    # clips_generated — последний статус (шаг 13 переименовал прежний video_done обратно).
+    assert IDEAS_STATUSES[-1] == "clips_generated"
+    assert "video_done" not in IDEAS_STATUSES
 
 
 # --- migrate_audio_beats_table ---
@@ -1384,3 +1391,78 @@ def test_relation_edges_includes_video_beat_prompts():
     from app.db import RELATION_EDGES
 
     assert ("video_beat_prompts", "beat", "audio_beat_prompts") in RELATION_EDGES
+
+
+# --- migrate_video_clips_table ---
+
+
+@pytest.mark.unit
+def test_migrate_video_clips_table_creates_table_with_fk(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_video_clips_table
+
+    migrate_video_clips_table()
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS video_clips" in c for c in calls)
+    assert any("REFERENCES audio_beat_prompts(id)" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_migrate_video_clips_table_has_expected_columns(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import migrate_video_clips_table
+
+    migrate_video_clips_table()
+
+    create_call = next(
+        str(c)
+        for c in mock_cursor.execute.call_args_list
+        if "CREATE TABLE IF NOT EXISTS video_clips" in str(c)
+    )
+    for col in ("storage", "key", "role", "beat", "created_at"):
+        assert col in create_call
+
+
+# --- insert_video_clip ---
+
+
+@pytest.mark.unit
+def test_insert_video_clip_executes_insert_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_video_clip
+
+    insert_video_clip("local", "clips/idea-7-beat-42-ts.mp4", "clip", 42)
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("INSERT INTO video_clips" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_insert_video_clip_passes_params(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import insert_video_clip
+
+    insert_video_clip("local", "clips/idea-7-beat-42-ts.mp4", "clip", 42)
+
+    insert_call = next(
+        c for c in mock_cursor.execute.call_args_list if "INSERT INTO video_clips" in str(c)
+    )
+    assert insert_call.args[1] == ("local", "clips/idea-7-beat-42-ts.mp4", "clip", 42)
+    assert insert_call.args[1][-1] == 42
+
+
+# --- RELATION_EDGES: video_clips ---
+
+
+@pytest.mark.unit
+def test_relation_edges_includes_video_clips():
+    from app.db import RELATION_EDGES
+
+    assert ("video_clips", "beat", "audio_beat_prompts") in RELATION_EDGES

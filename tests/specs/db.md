@@ -152,13 +152,13 @@ SQL, который выполняется:
 2. Для каждого значения из `IDEAS_STATUSES`: `ALTER TYPE idea_status ADD VALUE IF NOT EXISTS '<value>'` — добавляет недостающие значения в уже существующий тип.
 3. `CREATE TABLE IF NOT EXISTS ideas (id SERIAL PRIMARY KEY, name TEXT, status idea_status)`
 
-`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `audio_prompts_finished`, `audio_generated`, `audio_beats_generated`, `video_done`.
+`IDEAS_STATUSES` = `raw_idea`, `scenario_finished`, `clips_visual_style_finished`, `image_prompt_finished`, `image_generated`, `audio_prompts_finished`, `audio_generated`, `audio_beats_generated`, `video_prompts_finished`, `clips_generated`.
 
-**Примечание:** значение `audio_beats_generated` (шаг 11 — нарезка сегментов на биты) заняло позицию
-прежнего `clips_generated`. `migrate_ideas_table` лишь добавляет новые значения в enum
-(`ADD VALUE IF NOT EXISTS`) — старое `clips_generated` остаётся в типе `idea_status` неиспользуемым
-(Postgres не удаляет значения enum), на логику не влияет: маппинг шаг↔статус завязан на порядок
-Python-списка `IDEAS_STATUSES`, а не на внутренний порядок enum.
+**Примечание:** последний статус — `clips_generated` (шаг 13, финал генерации видео-клипов). Это имя
+уже было в enum раньше (исторически последняя стадия до того, как его переименовали в `video_done`),
+поэтому `ADD VALUE IF NOT EXISTS` для него — no-op, а прежнее `video_done` остаётся в типе
+`idea_status` неиспользуемым (Postgres не удаляет значения enum). На логику не влияет: маппинг
+шаг↔статус завязан на порядок Python-списка `IDEAS_STATUSES`, а не на внутренний порядок enum.
 
 Всегда вызывает `conn.commit()`.
 
@@ -322,6 +322,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
 - `("audio_seg_prompts", "scenario", "scenarios")`
 - `("audio_beats", "beat", "audio_beat_prompts")`
 - `("video_beat_prompts", "beat", "audio_beat_prompts")`
+- `("video_clips", "beat", "audio_beat_prompts")`
 
 **Безопасность:** имена таблиц/колонок берутся только из этого whitelist (не из
 пользовательского ввода), поэтому их допустимо подставлять в SQL f-строкой.
@@ -989,4 +990,52 @@ LLM: `{id (= существующий audio_beat_prompts.id), video_prompt, end_
   `(1, "vp", "ef")`
 - **пустой список**: только `DELETE`, нет `INSERT`
 - **commit один раз**: `conn.commit()` вызывается ровно один раз
+
+## `migrate_video_clips_table() -> None`
+
+### Contract
+Идемпотентно создаёт таблицу `video_clips` — реестр сгенерированных видео-клипов (шаг 13), по
+образцу `audio_beats`/`images`: storage-agnostic ключ `key` + маркер бэкенда `storage`. `beat` —
+FK на `audio_beat_prompts(id)`; `created_at` заполняет БД. Запускать после
+`migrate_audio_beat_prompts_table`.
+```
+CREATE TABLE IF NOT EXISTS video_clips (
+    id SERIAL PRIMARY KEY,
+    storage TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
+    role TEXT,
+    beat INTEGER REFERENCES audio_beat_prompts(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+Всегда `conn.commit()`. **Примечание:** входит в `RELATION_EDGES`
+(`("video_clips", "beat", "audio_beat_prompts")`) — родитель `audio_beat_prompts` имеет PK `id`,
+поэтому `fetch_rows("video_clips", "beat", <id>)` работает (нужно для побитовой идемпотентности
+шага 13).
+
+### Invariants
+1. Безопасно запускать многократно (`CREATE TABLE IF NOT EXISTS`).
+2. Колонки: `id, storage, key, role, beat, created_at`; `beat` — FK на `audio_beat_prompts(id)`.
+3. Всегда коммитит.
+
+### Test cases
+- **создаёт таблицу**: SQL содержит `CREATE TABLE IF NOT EXISTS video_clips` и
+  `REFERENCES audio_beat_prompts(id)`
+- **колонки**: DDL содержит `storage, key, role, beat, created_at`
+
+## `insert_video_clip(storage: str, key: str, role: str, beat_id: int) -> None`
+
+### Contract
+`INSERT INTO video_clips (storage, key, role, beat) VALUES (%s,%s,%s,%s)`. Значения:
+`(storage, key, role, beat_id)`. `created_at` не передаётся (DEFAULT `now()`). Каждый вызов —
+новая строка. Всегда `conn.commit()`.
+
+### Invariants
+1. SQL — `INSERT INTO video_clips (storage, key, role, beat) VALUES (...)`.
+2. Параметры — `(storage, key, role, beat_id)`.
+3. Всегда коммитит.
+
+### Test cases
+- **insert вызван**: `cur.execute` с SQL содержащим `INSERT INTO video_clips`; commit один раз
+- **параметры**: `("local", "clips/idea-7-beat-42-ts.mp4", "clip", 42)`
 
