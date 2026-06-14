@@ -38,9 +38,21 @@ User-content — единый текстовый блок: `GENERATE_IMAGE_PROMP
 1. LLM вызывается **с** `response_format={"type":"json_object"}`.
 2. В запрос попадают текст сценария, значения `visual_style` и данные персонажей.
 3. Изображения не передаются (это текстовый шаг, без vision).
+4. `GENERATE_IMAGE_PROMPT_PROMPT` (v3) требует ОТКРЫВАЮЩУЮ МАСТЕР-КАДРОВКУ, а не иллюстрацию:
+   картинка — буквальный входной кадр первого клипа («INPUT FRAME of the first video clip»)
+   и референс идентичности на всю цепочку («IDENTITY REFERENCE»); персонаж в кадре
+   («ON SCREEN», «not an illustrative hook scene»), лицо полностью читаемо («fully visible»),
+   композиция осевшая. v1 («изобрази открывающие 3-5 секунд скрипта») давала хук-сцену без
+   ведущего (idea-1: персонаж за рулём) → морф-артефакт в первые полсекунды бита 1.
+   v3 (по гайду LTX-2): негативное пространство — для композиции, но БЕЗ читаемого текста/чисел/
+   надписей/логотипов/мелких иконок на картинке («cannot keep text» — видео-модель их не удержит,
+   а кадр якорит цепочку); прежний призыв «supporting graphics» убран. Инвариант проверяется
+   regression-guard'ом `tests/unit/test_image_prompts_prompt.py`.
 
 ### Test cases
 - **парсит JSON в dict**: мок LLM возвращает JSON с 5 полями → dict содержит
   `image_prompt`, `camera_angle`, `lighting`, `mood`, `action`
 - **response_format задан**: `create()` вызван с `response_format={"type":"json_object"}`
 - **данные в запросе**: user-content содержит текст сценария, значение поля стиля и имя персонажа
+- **guard промпта** (`test_image_prompts_prompt.py`): ключевые фразы v2 на месте
+  (INPUT FRAME / IDENTITY REFERENCE / MASTER FRAMING / negative space / 5 полей ответа)

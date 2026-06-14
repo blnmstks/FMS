@@ -739,7 +739,7 @@ def test_s11_generate_beats_skips_when_no_scenario():
 # --- s12_video_prompts ---
 
 
-_S12_SEGMENTS = [{"seg_id": 11}]
+_S12_SEGMENTS = [{"seg_id": 11, "speaker": "Narrator", "emotion": "calm", "tts_text": "A B"}]
 _S12_BEATS = {11: [{"id": 102, "audio_text": "B"}, {"id": 101, "audio_text": "A"}]}
 _S12_AUDIO_BEATS = {101: [{"duration": 3.2}], 102: [{"duration": 2.1}]}
 _S12_VISUAL = [{f: f"v_{f}" for f in VISUAL_STYLE_FIELDS}]
@@ -750,11 +750,25 @@ _VIDEO_RESULT = {
         {"id": 102, "video_prompt": "vp2", "end_frame": "ef2"},
     ]
 }
-# beat_inputs, ожидаемые на входе сервиса: отсортированы по id, с реальной длительностью.
-_EXPECTED_BEAT_INPUTS = [
-    {"id": 101, "audio_text": "A", "duration": 3.2},
-    {"id": 102, "audio_text": "B", "duration": 2.1},
+# seg_inputs, ожидаемые на входе сервиса: сегменты сгруппированы, биты отсортированы по id с реальной
+# длительностью, длительность сегмента = сумма битов.
+_EXPECTED_SEG_INPUTS = [
+    {
+        "seg_id": 11,
+        "speaker": "Narrator",
+        "emotion": "calm",
+        "tts_text": "A B",
+        "duration": 5.3,
+        "beats": [
+            {"id": 101, "audio_text": "A", "duration": 3.2},
+            {"id": 102, "audio_text": "B", "duration": 2.1},
+        ],
+    }
 ]
+
+
+_S12_IMAGE_PROMPT_ROW = {"id": 50, "image_prompt": "hero at desk", "camera_angle": "eye-level"}
+_S12_FIRST_IMAGE = "assets/images/idea-7-first-beat.png"
 
 
 def _fetch_rows_for_s12(video_for):
@@ -774,6 +788,10 @@ def _fetch_rows_for_s12(video_for):
             return _S12_VISUAL
         if table == "characters_sheet":
             return _S12_CHARS
+        if table == "image_prompts":
+            return [_S12_IMAGE_PROMPT_ROW]
+        if table == "images":
+            return [{"key": _S12_FIRST_IMAGE}]
         return []
 
     return fetch_rows
@@ -796,7 +814,12 @@ def test_s12_video_prompts_generates_replaces_and_advances():
     gen.assert_called_once()
     args = gen.call_args.args
     assert args[0] == "SCEN"  # scenario_text
-    assert args[3] == _EXPECTED_BEAT_INPUTS  # beat_inputs, отсортированы, с длительностью
+    assert args[3] == _EXPECTED_SEG_INPUTS  # seg_inputs: сегменты с вложенными битами по id
+    # Граундинг бита 1: сервису уходят реальная картинка шага 8 и поля её image-prompt'а.
+    kwargs = gen.call_args.kwargs
+    assert kwargs["first_beat_image_path"] == _S12_FIRST_IMAGE
+    assert kwargs["image_prompt"]["image_prompt"] == "hero at desk"
+    assert kwargs["image_prompt"]["camera_angle"] == "eye-level"
     rep.assert_called_once_with(_VIDEO_RESULT["beats"], 3)
     upd.assert_called_once_with(7, "video_prompts_finished")
     assert result["pipeline_step"] == 13
@@ -887,7 +910,12 @@ def test_s12_video_prompts_skips_when_no_scenario():
 
 _S13_SEGMENTS = [{"seg_id": 11}]
 _S13_BEATS = {11: [{"id": 102}, {"id": 101}]}  # неотсортированы; в порядке сценария → 101, 102
-_S13_AUDIO_BEATS = {101: [{"key": "beats/b101.wav"}], 102: [{"key": "beats/b102.wav"}]}
+_S13_AUDIO_BEATS = {
+    101: [{"key": "beats/b101.wav", "duration": 3.0}],
+    102: [{"key": "beats/b102.wav", "duration": 4.0}],
+}
+_QC_PASS = {"verdict": "pass", "reason": "ok"}
+_QC_FAIL = {"verdict": "fail", "reason": "face covered"}
 _S13_VBP = {
     101: [{"video_prompt": "vp1", "end_frame": "ef1"}],
     102: [{"video_prompt": "vp2", "end_frame": "ef2"}],
@@ -925,8 +953,9 @@ def test_s13_generate_clips_generates_chains_and_advances():
     with (
         patch("app.graph.fetch_idea_by_status", return_value=idea),
         patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
-        patch("app.graph.build_video_prompt_text", side_effect=lambda r: r["video_prompt"]),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
         patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.review_clip", return_value=_QC_PASS),
         patch("app.graph.insert_video_clip") as ins,
         patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
         patch("app.graph.update_idea_status") as upd,
@@ -956,15 +985,16 @@ def test_s13_generate_clips_skips_existing_but_still_extracts_frame():
     with (
         patch("app.graph.fetch_idea_by_status", return_value=idea),
         patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: clips[v])),
-        patch("app.graph.build_video_prompt_text", side_effect=lambda r: r["video_prompt"]),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
         patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.review_clip", return_value=_QC_PASS),
         patch("app.graph.insert_video_clip") as ins,
         patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
         patch("app.graph.update_idea_status") as upd,
     ):
         result = s13_generate_clips({})
 
-    # сгенерирован только 102; 101 пропущен (клип уже есть)
+    # сгенерирован только 102; 101 пропущен (клип уже есть и прошёл resume-QC)
     assert [c.args[4] for c in gen.call_args_list] == [102]
     ins.assert_called_once()
     # последний кадр извлекается для ОБОИХ битов; для 101 — из существующего клипа на диске
@@ -972,6 +1002,240 @@ def test_s13_generate_clips_skips_existing_but_still_extracts_frame():
     assert frame.call_args_list[0].args[0] == "clips/old-101.mp4"
     # вход 102 = кадр, извлечённый из клипа 101 (сцепка не рвётся)
     assert gen.call_args_list[0].args[1] == frame.call_args_list[0].args[1]
+    upd.assert_called_once_with(7, "clips_generated")
+    assert result["pipeline_step"] == 14
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_retries_failed_qc_then_passes():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 3),
+        # бит 101: fail → pass; бит 102: pass сразу
+        patch("app.graph.review_clip", side_effect=[_QC_FAIL, _QC_PASS, _QC_PASS]) as review,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out),
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    # бит 101 сгенерирован дважды (ретрай со свежими сидами), 102 — один раз
+    assert [c.args[4] for c in gen.call_args_list] == [101, 101, 102]
+    assert review.call_count == 3
+    # insert — по одному на бит, только ПОСЛЕ прохождения QC
+    assert ins.call_count == 2
+    upd.assert_called_once_with(7, "clips_generated")
+    assert result["pipeline_step"] == 14
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_all_attempts_start_from_prev_frame():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 3),
+        # 101: pass; 102: fail, fail → третья попытка pass
+        patch("app.graph.review_clip", side_effect=[_QC_PASS, _QC_FAIL, _QC_FAIL, _QC_PASS]),
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
+        patch("app.graph.update_idea_status"),
+    ):
+        s13_generate_clips({})
+
+    calls_102 = [c for c in gen.call_args_list if c.args[4] == 102]
+    assert len(calls_102) == 3
+    chained = frame.call_args_list[0].args[1]  # кадр из клипа 101
+    # ВСЕ попытки бита 102 стартуют с одного и того же кадра предыдущего бита (сцепка не рвётся):
+    # ре-анкера на картинку шага 8 нет, вариативность даёт только свежий сид
+    assert all(c.args[1] == chained for c in calls_102)
+    assert all(c.args[1] != _S13_FIRST_IMAGE for c in calls_102)
+    assert ins.call_count == 2
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_repairs_prompt_then_passes():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    _REPAIRED = {"video_prompt": "vp1-fixed", "end_frame": "ef1-fixed"}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 2),
+        patch("app.graph.CLIP_QC_MAX_IMPROVE_ROUNDS", 2),
+        # 101: раунд0 [fail, fail] → repair → раунд1 [pass]; 102: pass
+        patch("app.graph.review_clip", side_effect=[_QC_FAIL, _QC_FAIL, _QC_PASS, _QC_PASS]),
+        patch("app.graph.repair_video_prompt", return_value=_REPAIRED) as repair,
+        patch("app.graph.update_video_beat_prompt") as upd_prompt,
+        patch("app.graph.delete_files"),
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out),
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        s13_generate_clips({})
+
+    # бит 101: 2 сида (раунд0) + 1 (раунд1, pass) = 3 генерации; 102: 1 → всего 4
+    assert [c.args[4] for c in gen.call_args_list] == [101, 101, 101, 102]
+    # repair вызван один раз (после исчерпания сидов раунда0), с причиной отказа QC
+    repair.assert_called_once()
+    assert repair.call_args.args[2]["reason"] == _QC_FAIL["reason"]
+    # улучшенный промпт записан в БД для бита 101
+    upd_prompt.assert_called_once_with(101, "vp1-fixed", "ef1-fixed")
+    # после repair раунд1 собирает текст из НОВОГО video_prompt
+    assert gen.call_args_list[2].args[0] == "vp1-fixed"
+    assert ins.call_count == 2  # оба бита записаны после pass
+    upd.assert_called_once_with(7, "clips_generated")
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_cleans_up_failed_artifacts_on_pass():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    counter = {"n": 0}
+
+    def _gen(*a):  # уникальное имя на каждую попытку, чтобы отличать зафейленные от успешного
+        counter["n"] += 1
+        return f"clip-{a[4]}-{counter['n']}.mp4"
+
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=_gen),
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 3),
+        patch("app.graph.CLIP_QC_MAX_IMPROVE_ROUNDS", 0),
+        patch("app.graph.qc_frame_paths", side_effect=lambda c: [f"{c}-first.png"]),
+        # 101: fail, pass; 102: pass
+        patch("app.graph.review_clip", side_effect=[_QC_FAIL, _QC_PASS, _QC_PASS]),
+        patch("app.graph.delete_files") as delete_files,
+        patch("app.graph.insert_video_clip"),
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out),
+        patch("app.graph.update_idea_status"),
+    ):
+        s13_generate_clips({})
+
+    # бит 101 прошёл со 2-й попытки → зафейленный clip-101-1.mp4 и его qc-кадр убраны
+    delete_files.assert_called_once()
+    removed = delete_files.call_args.args[0]
+    assert "clip-101-1.mp4" in removed
+    assert "clip-101-1.mp4-first.png" in removed
+    # успешный клип (clip-101-2.mp4) НЕ удаляется
+    assert "clip-101-2.mp4" not in removed
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_raises_after_improve_rounds_exhausted():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 2),
+        patch("app.graph.CLIP_QC_MAX_IMPROVE_ROUNDS", 1),
+        patch("app.graph.review_clip", return_value=_QC_FAIL),
+        patch(
+            "app.graph.repair_video_prompt", return_value={"video_prompt": "x", "end_frame": "y"}
+        ) as repair,
+        patch("app.graph.update_video_beat_prompt") as upd_prompt,
+        patch("app.graph.delete_files") as delete_files,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out),
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        with pytest.raises(RuntimeError, match="beat 101"):
+            s13_generate_clips({})
+
+    # 2 сида × 2 раунда (исходный + 1 улучшение) = 4 генерации
+    assert [c.args[4] for c in gen.call_args_list] == [101, 101, 101, 101]
+    repair.assert_called_once()
+    upd_prompt.assert_called_once()  # улучшенный промпт остаётся в БД (resume продолжит с него)
+    # брак не попадает ни в БД клипов, ни в статус; зафейленные файлы НЕ убираются (для разбора)
+    ins.assert_not_called()
+    upd.assert_not_called()
+    delete_files.assert_not_called()
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_no_improve_when_rounds_zero():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: [])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 2),
+        patch("app.graph.CLIP_QC_MAX_IMPROVE_ROUNDS", 0),
+        patch("app.graph.review_clip", return_value=_QC_FAIL),
+        patch("app.graph.repair_video_prompt") as repair,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out),
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        with pytest.raises(RuntimeError, match="beat 101"):
+            s13_generate_clips({})
+
+    # improve выключен: только 2 сида, repair не зван (поведение «после сидов сразу стоп»)
+    assert [c.args[4] for c in gen.call_args_list] == [101, 101]
+    repair.assert_not_called()
+    ins.assert_not_called()
+    upd.assert_not_called()
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_requalifies_existing_clip_and_regenerates_on_fail():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    clips = {101: [{"key": "clips/old-101.mp4"}], 102: []}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: clips[v])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 3),
+        # existing 101: fail → перегенерация 101: pass; 102: pass
+        patch("app.graph.review_clip", side_effect=[_QC_FAIL, _QC_PASS, _QC_PASS]) as review,
+        patch("app.graph.delete_video_clips_for_beats") as delete,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
+        patch("app.graph.update_idea_status"),
+    ):
+        s13_generate_clips({})
+
+    # существующий клип проверен ПЕРВЫМ — битый хвост не должен заражать цепочку при resume
+    assert review.call_args_list[0].args[0] == "clips/old-101.mp4"
+    delete.assert_called_once_with([101])
+    assert [c.args[4] for c in gen.call_args_list] == [101, 102]
+    assert ins.call_count == 2
+    # в сцепку уходит кадр НОВОГО клипа 101, не старого
+    assert frame.call_args_list[0].args[0] == "clip-101.mp4"
+
+
+@pytest.mark.unit
+def test_s13_generate_clips_qc_disabled_keeps_legacy_behavior():
+    idea = {"idea_id": 7, "idea_name": "X", "exists": True}
+    clips = {101: [{"key": "clips/old-101.mp4"}], 102: []}
+    with (
+        patch("app.graph.fetch_idea_by_status", return_value=idea),
+        patch("app.graph.fetch_rows", side_effect=_fetch_rows_for_s13(lambda v: clips[v])),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
+        patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.CLIP_QC_MAX_ATTEMPTS", 0),
+        patch("app.graph.review_clip") as review,
+        patch("app.graph.insert_video_clip") as ins,
+        patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out),
+        patch("app.graph.update_idea_status") as upd,
+    ):
+        result = s13_generate_clips({})
+
+    review.assert_not_called()  # QC выключен: ни existing, ни новые клипы не проверяются
+    assert [c.args[4] for c in gen.call_args_list] == [102]
+    ins.assert_called_once()
     upd.assert_called_once_with(7, "clips_generated")
     assert result["pipeline_step"] == 14
 
@@ -986,7 +1250,7 @@ def test_s13_generate_clips_skips_beats_without_prompt_or_audio():
         102: [],
         103: [{"video_prompt": "vp3"}],
     }
-    audio = {101: [{"key": "b101.wav"}], 102: [], 103: []}  # 103 не озвучен
+    audio = {101: [{"key": "b101.wav", "duration": 3.0}], 102: [], 103: []}  # 103 не озвучен
 
     def fr(table, column, value):
         if table == "scenarios":
@@ -1010,8 +1274,9 @@ def test_s13_generate_clips_skips_beats_without_prompt_or_audio():
     with (
         patch("app.graph.fetch_idea_by_status", return_value=idea),
         patch("app.graph.fetch_rows", side_effect=fr),
-        patch("app.graph.build_video_prompt_text", side_effect=lambda r: r["video_prompt"]),
+        patch("app.graph.build_video_prompt_text", side_effect=lambda r, *a: r["video_prompt"]),
         patch("app.graph.generate_beat_clip", side_effect=lambda *a: f"clip-{a[4]}.mp4") as gen,
+        patch("app.graph.review_clip", return_value=_QC_PASS),
         patch("app.graph.insert_video_clip") as ins,
         patch("app.graph.extract_last_frame", side_effect=lambda clip, out: out) as frame,
         patch("app.graph.update_idea_status") as upd,

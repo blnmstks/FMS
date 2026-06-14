@@ -16,17 +16,29 @@ def test_snap_boundaries_single_beat_is_whole_file():
 
 
 @pytest.mark.unit
-def test_snap_boundaries_two_beats_stitch_at_pause_midpoint():
-    from app.services.audio_beats import PAD_MS, snap_boundaries
+def test_snap_boundaries_wide_pause_is_capped_not_split_at_midpoint():
+    from app.services.audio_beats import MAX_EDGE_SILENCE_MS, PAD_MS, snap_boundaries
 
+    # Пауза 500 мс > 2·CAP: середина выбрасывается, каждый бит уносит максимум CAP тишины.
     cuts = snap_boundaries([(0.0, 1.0), (1.5, 2.5)], 3000)
 
-    mid = (1000 + 1500) / 2  # 1250
     assert len(cuts) == 2
-    assert cuts[0] == (0, mid)
-    assert cuts[1] == (mid - PAD_MS, 3000)
+    assert cuts[0] == (0, 1000 + MAX_EDGE_SILENCE_MS)
+    assert cuts[1] == (1500 - MAX_EDGE_SILENCE_MS - PAD_MS, 3000)
     assert cuts[0][0] == 0
     assert cuts[-1][1] == 3000
+
+
+@pytest.mark.unit
+def test_snap_boundaries_narrow_pause_still_stitches_at_midpoint():
+    from app.services.audio_beats import PAD_MS, snap_boundaries
+
+    # Пауза 300 мс ≤ 2·CAP: поведение как раньше — стык в середине паузы.
+    cuts = snap_boundaries([(0.0, 1.0), (1.3, 2.5)], 3000)
+
+    mid = (1000 + 1300) / 2  # 1150
+    assert cuts[0] == (0, mid)
+    assert cuts[1] == (mid - PAD_MS, 3000)
 
 
 # --- slice_segment_beats ---

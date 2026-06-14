@@ -991,6 +991,24 @@ LLM: `{id (= существующий audio_beat_prompts.id), video_prompt, end_
 - **пустой список**: только `DELETE`, нет `INSERT`
 - **commit один раз**: `conn.commit()` вызывается ровно один раз
 
+## `update_video_beat_prompt(beat_id: int, video_prompt: str, end_frame: str) -> None`
+
+### Contract
+Точечно перезаписывает `video_prompt` и `end_frame` ОДНОГО бита:
+`UPDATE video_beat_prompts SET video_prompt=%s, end_frame=%s WHERE beat=%s` с параметрами
+`(video_prompt, end_frame, beat_id)`, затем `conn.commit()`. Нужна шагу 13 (self-repair промпта
+по фидбеку QC) — в отличие от `replace_video_prompts` (полная пересборка сценария). Нет строки на
+бит → 0 затронутых строк (no-op, не ошибка).
+
+### Invariants
+1. SQL — `UPDATE video_beat_prompts SET video_prompt = %s, end_frame = %s WHERE beat = %s`.
+2. Параметры — `(video_prompt, end_frame, beat_id)` (именно в этом порядке).
+3. Всегда коммитит.
+
+### Test cases
+- **update вызван**: `cur.execute` с SQL содержащим `UPDATE video_beat_prompts`; commit один раз
+- **параметры**: `update_video_beat_prompt(42, "vp2", "ef2")` → `args[1] == ("vp2", "ef2", 42)`
+
 ## `migrate_video_clips_table() -> None`
 
 ### Contract
@@ -1038,4 +1056,21 @@ CREATE TABLE IF NOT EXISTS video_clips (
 ### Test cases
 - **insert вызван**: `cur.execute` с SQL содержащим `INSERT INTO video_clips`; commit один раз
 - **параметры**: `("local", "clips/idea-7-beat-42-ts.mp4", "clip", 42)`
+
+## `delete_video_clips_for_beats(beat_ids: list[int]) -> None`
+
+### Contract
+`DELETE FROM video_clips WHERE beat = ANY(%s)` с параметром `(beat_ids,)`. Всегда
+`conn.commit()`. Зеркало `delete_audio_beats_for_beats`. Нужна шагу 13 при resume:
+существующий клип, забракованный QC-гейтом, перегенерируется — старую запись удаляем,
+чтобы не плодить дубли. Пустой список — корректный no-op.
+
+### Invariants
+1. SQL — `DELETE FROM video_clips WHERE beat = ANY(%s)`.
+2. Параметр — кортеж с одним элементом-списком `(beat_ids,)`.
+3. Всегда коммитит.
+
+### Test cases
+- **delete вызван**: `cur.execute` с SQL содержащим `DELETE FROM video_clips`; commit один раз
+- **параметры**: `delete_video_clips_for_beats([1, 2, 3])` → `args[1] == ([1, 2, 3],)`
 

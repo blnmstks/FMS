@@ -8,10 +8,15 @@ from app.utils.audio import slice_wav, wav_duration_ms
 # Граница между фразами кладётся в середину паузы; небольшой запас (мс) на стыках, чтобы не
 # отрезать свору/атаку фонемы. (Как в референсном slice_segment.py.)
 PAD_MS = 40
+# Кап тишины на внутреннем краю бита: длинные паузы между битами не тащатся в клипы целиком —
+# мёртвый воздух 0.3-0.6 с на краях давал «подвисшие» стоп-кадры при склейке (видео стоит,
+# никто не говорит). Узкие паузы (≤ 2·CAP) режутся по середине, как раньше.
+MAX_EDGE_SILENCE_MS = 200
 
 
 def snap_boundaries(spans, total_ms):
-    # Стык между битом k и k+1 — в середину зазора. Края клипа = границы файла. Запас PAD_MS внутри.
+    # Стык между битом k и k+1 — в середине зазора, но не дальше MAX_EDGE_SILENCE_MS от речи
+    # (у широкой паузы середина выбрасывается). Края клипа = границы файла. Запас PAD_MS внутри.
     cuts = []
     n = len(spans)
     for i, (b, e) in enumerate(spans):
@@ -20,8 +25,9 @@ def snap_boundaries(spans, total_ms):
         if i > 0:
             prev_end = spans[i - 1][1] * 1000
             mid = (prev_end + b * 1000) / 2  # середина паузы перед битом i
-            start = mid
-            cuts[-1] = (cuts[-1][0], mid)  # хвост предыдущего тоже до mid
+            # хвост предыдущего и старт текущего — не дальше капа от своей речи
+            cuts[-1] = (cuts[-1][0], min(mid, prev_end + MAX_EDGE_SILENCE_MS))
+            start = max(mid, b * 1000 - MAX_EDGE_SILENCE_MS)
         cuts.append(
             (
                 max(0, start - PAD_MS if i > 0 else 0),

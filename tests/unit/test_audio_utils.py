@@ -124,3 +124,40 @@ def test_slice_wav_returns_path(tmp_path):
     dst = tmp_path / "clip.wav"
 
     assert slice_wav(src, str(dst), 0, 100) == str(dst)
+
+
+@pytest.mark.unit
+def test_pad_wav_to_duration_pads_with_trailing_silence(tmp_path):
+    from app.utils.audio import pad_wav_to_duration, wav_duration_seconds, write_wav
+
+    src = write_wav(b"\x00\x00" * 2400, str(tmp_path / "src.wav"))  # 0.1 c
+    dst = tmp_path / "padded.wav"
+
+    pad_wav_to_duration(src, str(dst), 0.3)
+
+    assert abs(wav_duration_seconds(str(dst)) - 0.3) <= 0.005
+
+
+@pytest.mark.unit
+def test_pad_wav_to_duration_keeps_longer_input_intact(tmp_path):
+    from app.utils.audio import pad_wav_to_duration, wav_duration_seconds, write_wav
+
+    src = write_wav(b"\x00\x00" * 2400, str(tmp_path / "src.wav"))  # 0.1 c
+    dst = tmp_path / "padded.wav"
+
+    pad_wav_to_duration(src, str(dst), 0.05)  # цель короче входа — НЕ резать
+
+    assert abs(wav_duration_seconds(str(dst)) - 0.1) <= 0.005
+
+
+@pytest.mark.unit
+def test_pad_wav_to_duration_creates_nested_dirs_and_returns_path(tmp_path):
+    from app.utils.audio import pad_wav_to_duration, write_wav
+
+    src = write_wav(b"\x00\x00" * 2400, str(tmp_path / "src.wav"))
+    dst = tmp_path / "padded" / "x.wav"
+
+    result = pad_wav_to_duration(src, str(dst), 0.2)
+
+    assert dst.exists()
+    assert result == str(dst)

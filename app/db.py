@@ -499,6 +499,17 @@ def replace_video_prompts(beats: list[dict], scenario_id: int) -> None:
         conn.commit()
 
 
+def update_video_beat_prompt(beat_id: int, video_prompt: str, end_frame: str) -> None:
+    # Перезаписывает video_prompt и end_frame ОДНОГО бита (шаг 13, self-repair промпта по фидбеку QC)
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE video_beat_prompts SET video_prompt = %s, end_frame = %s WHERE beat = %s",
+                (video_prompt, end_frame, beat_id),
+            )
+        conn.commit()
+
+
 def migrate_video_clips_table() -> None:
     # Идемпотентно создаёт таблицу video_clips — реестр сгенерированных видео-клипов (шаг 13), по
     # образцу audio_beats/images: storage-agnostic ключ key + маркер бэкенда storage. beat — FK на
@@ -529,6 +540,13 @@ def insert_video_clip(storage: str, key: str, role: str, beat_id: int) -> None:
                 "INSERT INTO video_clips (storage, key, role, beat) VALUES (%s, %s, %s, %s)",
                 (storage, key, role, beat_id),
             )
+        conn.commit()
+
+
+def delete_video_clips_for_beats(beat_ids: list[int]) -> None:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM video_clips WHERE beat = ANY(%s)", (beat_ids,))
         conn.commit()
 
 

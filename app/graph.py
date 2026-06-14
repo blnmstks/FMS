@@ -1,12 +1,14 @@
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.config import VAULT_PATH, VIDEOS_DIR
+from app.config import CLIP_QC_MAX_ATTEMPTS, CLIP_QC_MAX_IMPROVE_ROUNDS, VAULT_PATH, VIDEOS_DIR
 from app.db import (
     IDEAS_STATUSES,
+    IMAGE_PROMPT_FIELDS,
     STYLE_FIELDS,
     VISUAL_STYLE_FIELDS,
     delete_audio_beats_for_beats,
+    delete_video_clips_for_beats,
     fetch_channel_info,
     fetch_channel_style_info,
     fetch_idea_by_status,
@@ -24,12 +26,14 @@ from app.db import (
     replace_audio_prompts,
     replace_video_prompts,
     update_idea_status,
+    update_video_beat_prompt,
     upsert_visual_styles,
 )
 from app.services.audio_beats import slice_segment_beats
 from app.services.audio_prompts import generate_audio_prompts
 from app.services.audio_tts import generate_segment_audio
 from app.services.branding import analyze_channel
+from app.services.clip_qc import qc_frame_paths, review_clip
 from app.services.comfyui import (
     build_video_prompt_text,
     generate_beat_clip,
@@ -39,10 +43,11 @@ from app.services.ideas import generate_video_ideas
 from app.services.image_prompts import generate_image_prompt
 from app.services.scenarios import generate_scenario
 from app.services.transcripts import analyze_transcripts
+from app.services.video_prompt_repair import repair_video_prompt
 from app.services.video_prompts import generate_video_prompts
 from app.services.visual_styles import generate_visual_style
 from app.state import ProjectState
-from app.utils.files import read_from_vault, read_text_file, save_to_vault
+from app.utils.files import delete_files, read_from_vault, read_text_file, save_to_vault
 from app.utils.video import extract_last_frame
 
 
@@ -276,7 +281,7 @@ def dispatch(state: ProjectState) -> dict:
 
 
 def s5_scenario(state: ProjectState) -> dict:
-    # Шаг 5: по идее со статусом raw_idea генерирует подробный сценарий в стиле канала.
+    # Шаг 5: по idea со статусом raw_idea генерирует подробный сценарий в стиле канала.
     # Диспетчер заводит сюда только при наличии raw_idea; защитная ветка — на случай гонки.
     idea = fetch_raw_idea()
     if not idea.get("raw_idea_exists"):
@@ -342,7 +347,7 @@ def s6_visual_style(state: ProjectState) -> dict:
 
 
 def s7_image_prompt(state: ProjectState) -> dict:
-    # Шаг 7: по идее со статусом clips_visual_style_finished генерирует через ИИ image-prompt
+    # Шаг 7: по idea со статусом clips_visual_style_finished генерирует через ИИ image-prompt
     # ПЕРВОГО бита сценария и сохраняет его в image_prompts (привязка к сценарию), переводит
     # идею в image_prompt_finished. Узел самодостаточен (не доверяет state).
     # Статус меняется ТОЛЬКО после успешной записи в БД: при ошибке insert_image_prompt
@@ -412,7 +417,7 @@ def s8_generate_image(state: ProjectState) -> dict:
 
 
 def s9_audio_prompts(state: ProjectState) -> dict:
-    # Шаг 9: по идее со статусом image_generated генерирует через ИИ промпты аудио-сегментов
+    # Шаг 9: по idea со статусом image_generated генерирует промпты аудио-сегментов
     # (для TTS) и их битов для сценария, сохраняет их в audio_seg_prompts + audio_beat_prompts
     # (заменяя прежние), переводит идею в audio_prompts_finished. Узел самодостаточен.
     # Если промпты для сценария уже есть — предлагает перейти к следующему шагу или
@@ -549,12 +554,14 @@ def s11_generate_beats(state: ProjectState) -> dict:
 
 
 def s12_video_prompts(state: ProjectState) -> dict:
-    # Шаг 12: по идее со статусом audio_beats_generated генерирует через ИИ для КАЖДОГО уже
+    # Шаг 12: по idea со статусом audio_beats_generated генерирует через ИИ для КАЖДОГО уже
     # существующего бита сценария видео-промпт (video_prompt) и финальный кадр (end_frame),
     # сохраняет их в video_beat_prompts (заменяя прежние, replace_video_prompts), переводит идею в
     # video_prompts_finished. Узел самодостаточен. Биты НЕ создаются — берутся из audio_beat_prompts,
-    # длительность — реальная, из audio_beats (шаг 11); один LLM-проход по всем битам ради сцепки
-    # end_frame[i] -> вход клипа[i+1]. Если видео-промпты уже есть — предлагает перейти к следующему
+    # длительность — реальная, из audio_beats (шаг 11). В LLM биты уходят СГРУППИРОВАННЫМИ по своим
+    # сегментам (один спикер = один непрерывный визуальный момент), чтобы модель планировала единую
+    # дугу камеры на сегмент; один LLM-проход по всем битам ради сцепки end_frame[i] -> вход клипа[i+1].
+    # Если видео-промпты уже есть — предлагает перейти к следующему
     # шагу или перегенерировать; иначе генерирует сразу. Статус меняется ТОЛЬКО после успешной
     # записи: при ошибке исключение пробрасывается, статус и курсор не двигаются.
     idea = fetch_idea_by_status("audio_beats_generated")
@@ -570,21 +577,37 @@ def s12_video_prompts(state: ProjectState) -> dict:
     if scenario_id is None:
         return _advance(state, 12, {"idea_id": idea_id, "idea_name": idea_name})
 
-    # Собираем биты сценария в порядке id (= порядок сценария) с реальной длительностью из audio_beats.
-    segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id)
-    beats: list[dict] = []
+    # Собираем сегменты (в порядке seg_id = порядок сценария) с вложенными битами (в порядке id) и
+    # реальной длительностью из audio_beats. Вход сегмент-группированный — LLM планирует единую дугу
+    # камеры на сегмент. fetch_rows не сортирует, поэтому порядок задаём явно.
+    segments = sorted(
+        fetch_rows("audio_seg_prompts", "scenario", scenario_id), key=lambda s: s["seg_id"]
+    )
+    seg_inputs = []
     for seg in segments:
-        beats.extend(fetch_rows("audio_beat_prompts", "seg_id", seg["seg_id"]))
-    beats.sort(key=lambda b: b["id"])
-    beat_inputs = []
-    for b in beats:
-        audio_beat = fetch_rows("audio_beats", "beat", b["id"])
-        duration = audio_beat[0]["duration"] if audio_beat else None
-        beat_inputs.append(
-            {"id": b["id"], "audio_text": b.get("audio_text") or "", "duration": duration}
+        seg_beats = sorted(
+            fetch_rows("audio_beat_prompts", "seg_id", seg["seg_id"]), key=lambda b: b["id"]
+        )
+        beat_items = []
+        for b in seg_beats:
+            audio_beat = fetch_rows("audio_beats", "beat", b["id"])
+            duration = audio_beat[0]["duration"] if audio_beat else None
+            beat_items.append(
+                {"id": b["id"], "audio_text": b.get("audio_text") or "", "duration": duration}
+            )
+        seg_inputs.append(
+            {
+                "seg_id": seg["seg_id"],
+                "speaker": seg.get("speaker"),
+                "emotion": seg.get("emotion"),
+                "tts_text": seg.get("tts_text"),
+                "duration": round(sum(bi["duration"] for bi in beat_items if bi["duration"]), 3),
+                "beats": beat_items,
+            }
         )
 
-    existing = [b for b in beats if fetch_rows("video_beat_prompts", "beat", b["id"])]
+    beat_ids = [bi["id"] for s in seg_inputs for bi in s["beats"]]
+    existing = [bid for bid in beat_ids if fetch_rows("video_beat_prompts", "beat", bid)]
     if existing:
         choice = interrupt(
             f"STATE 12 — Found {len(existing)} existing video prompt(s) for this scenario.\n"
@@ -599,22 +622,117 @@ def s12_video_prompts(state: ProjectState) -> dict:
     visual_style = {f: visual_row.get(f) for f in VISUAL_STYLE_FIELDS}
     characters = fetch_rows("characters_sheet", "scenario", scenario_id)
 
-    result = generate_video_prompts(scenario_text, visual_style, characters, beat_inputs)
+    # Граундинг бита 1: LLM видит РЕАЛЬНУЮ картинку шага 8 (буквальный входной кадр первого
+    # клипа) и текст, по которому она генерировалась, — иначе промпт бита 1 пере-ставляет сцену
+    # и первые полсекунды клипа превращаются в морф (наблюдалось на idea-1).
+    image_prompt_row = (fetch_rows("image_prompts", "scenario", scenario_id) or [{}])[0]
+    image_prompt_id = image_prompt_row.get("id")
+    images = fetch_rows("images", "image_prompt", image_prompt_id) if image_prompt_id else []
+    first_beat_image = images[0]["key"] if images else None
+    image_prompt_fields = (
+        {f: image_prompt_row.get(f) for f in IMAGE_PROMPT_FIELDS} if image_prompt_id else None
+    )
+
+    result = generate_video_prompts(
+        scenario_text,
+        visual_style,
+        characters,
+        seg_inputs,
+        first_beat_image_path=first_beat_image,
+        image_prompt=image_prompt_fields,
+    )
     replace_video_prompts(result.get("beats") or [], scenario_id)
     update_idea_status(idea_id, "video_prompts_finished")
     print(f"STATE 12 — video prompts saved and idea marked video_prompts_finished: {idea_name}")
     return _advance(state, 12, {"idea_id": idea_id, "idea_name": idea_name})
 
 
+def _cleanup_failed_artifacts(failed_clips: list[str]) -> None:
+    # После того как бит прошёл QC, подчищаем с диска все зафейленные попытки: сами клипы и их
+    # QC-кадры (frames/qc/<stem>-{first,mid,last}.png). Успешный клип и его кадр сцепки не трогаем.
+    # Нет зафейленных (бит прошёл с первой попытки) — чистить нечего.
+    if not failed_clips:
+        return
+    paths = list(failed_clips)
+    for clip in failed_clips:
+        paths.extend(qc_frame_paths(clip))
+    delete_files(paths)
+
+
+def _generate_clip_with_qc(
+    video_prompt_row: dict,
+    prev_frame: str,
+    ref_image: str,
+    audio_beat: dict,
+    idea_id: int,
+    beat_id: int,
+    prev_end_frame: str | None = None,
+) -> str:
+    # Цикл генерации одного бита с QC-гейтом и self-repair промпта. Сцепка идёт по последнему
+    # кадру, поэтому брак (лицо закрыто графикой, безголовый торс, «подменённый» персонаж) нельзя
+    # пускать дальше — он заражает все следующие биты. Двухуровневая стратегия:
+    #   1) CLIP_QC_MAX_ATTEMPTS сид-попыток с одним промптом — дёшево, без LLM (смена сида лечит
+    #      сидо-зависимые артефакты). Все попытки стартуют с prev_frame (он валиден — прошёл QC
+    #      предыдущего бита); ref_image — только эталон идентичности для review_clip.
+    #   2) если раунд сидов целиком провалился — причина отказа QC уходит в LLM (repair_video_prompt),
+    #      та переписывает video_prompt/end_frame, правка пишется в БД, и раунд сидов повторяется.
+    # До CLIP_QC_MAX_IMPROVE_ROUNDS раундов улучшения; потом RuntimeError (статус идеи не двигается,
+    # брак в video_clips не пишется, зафейленные файлы оставляем для разбора, resume продолжит с
+    # уже улучшенным промптом). При успехе зафейленные попытки убираются с диска.
+    duration = float(audio_beat.get("duration") or 0.0)
+    if CLIP_QC_MAX_ATTEMPTS == 0:  # QC выключен — одна генерация без проверки (поведение до гейта)
+        prompt_text = build_video_prompt_text(video_prompt_row, prev_end_frame)
+        return generate_beat_clip(prompt_text, prev_frame, audio_beat["key"], idea_id, beat_id)
+
+    row = dict(video_prompt_row)  # копия: её video_prompt/end_frame правит improve по ходу
+    rounds = max(CLIP_QC_MAX_IMPROVE_ROUNDS, 0)
+    failed_clips: list[str] = []
+    verdict: dict = {}
+    for improve_round in range(rounds + 1):  # раунд 0 — исходный промпт, далее улучшенные
+        prompt_text = build_video_prompt_text(row, prev_end_frame)
+        for attempt in range(1, CLIP_QC_MAX_ATTEMPTS + 1):
+            clip_path = generate_beat_clip(
+                prompt_text, prev_frame, audio_beat["key"], idea_id, beat_id
+            )
+            verdict = review_clip(clip_path, ref_image, duration)
+            if verdict.get("verdict") == "pass":
+                _cleanup_failed_artifacts(failed_clips)
+                return clip_path
+            failed_clips.append(clip_path)
+            print(
+                f"STATE 13 — beat {beat_id}: QC fail "
+                f"(round {improve_round}, attempt {attempt}/{CLIP_QC_MAX_ATTEMPTS}): "
+                f"{verdict.get('reason', '')}"
+            )
+        if improve_round < rounds:  # сиды раунда исчерпаны — чиним сам промпт по фидбеку QC
+            fixed = repair_video_prompt(
+                row.get("video_prompt") or "", row.get("end_frame") or "", verdict
+            )
+            row["video_prompt"] = fixed.get("video_prompt") or row.get("video_prompt")
+            row["end_frame"] = fixed.get("end_frame") or row.get("end_frame")
+            update_video_beat_prompt(beat_id, row["video_prompt"], row["end_frame"])
+            print(
+                f"STATE 13 — beat {beat_id}: prompt repaired "
+                f"(round {improve_round + 1}/{rounds}) after QC reason: {verdict.get('reason', '')}"
+            )
+    raise RuntimeError(
+        f"beat {beat_id}: clip QC failed after {CLIP_QC_MAX_ATTEMPTS} seed attempt(s) "
+        f"× {rounds + 1} prompt round(s): {verdict.get('reason', '')}"
+    )
+
+
 def s13_generate_clips(state: ProjectState) -> dict:
     # Шаг 13: по idea со статусом video_prompts_finished генерирует видео-клип на КАЖДЫЙ озвученный
     # бит через ComfyUI (LTX-2.3), сцепляя клипы по последнему кадру: первый бит стартует с картинки
-    # шага 8, каждый следующий — с последнего кадра предыдущего клипа (ffmpeg). Длина клипа = точная
-    # длина WAV бита (её меряет сервис). Регистрирует клипы в video_clips и переводит идею в
-    # clips_generated. Узел самодостаточный, полностью автоматический (без interrupt).
-    # Побитовая идемпотентность: бит с уже существующим клипом не перегенерируется, но его последний
-    # кадр всё равно извлекается — сцепка не рвётся на повторном/прерванном прогоне. Статус меняется
-    # ТОЛЬКО после успешной генерации и записи: при ошибке исключение пробрасывается, курсор не двигается.
+    # шага 8, каждый следующий — с последнего кадра предыдущего клипа (ffmpeg). Каждый клип проходит
+    # QC-гейт (review_clip, vision-LLM) с ретраями ДО записи в БД и до попадания его кадра в сцепку
+    # (_generate_clip_with_qc). Регистрирует клипы в video_clips и переводит идею в clips_generated.
+    # Узел самодостаточный, полностью автоматический (без interrupt).
+    # Побитовая идемпотентность: бит с уже существующим клипом не перегенерируется, но при
+    # включённом QC существующий клип сперва ре-квалифицируется — забракованный удаляется из БД и
+    # генерируется заново (битый хвост не должен заражать цепочку на resume); его последний кадр
+    # всё равно извлекается — сцепка не рвётся. Статус меняется ТОЛЬКО после успешной генерации
+    # и записи: при ошибке исключение пробрасывается, курсор не двигается.
     idea = fetch_idea_by_status("video_prompts_finished")
     if not idea.get("exists"):
         return _advance(state, 13)
@@ -627,14 +745,19 @@ def s13_generate_clips(state: ProjectState) -> dict:
     if scenario_id is None:
         return _advance(state, 13, {"idea_id": idea_id, "idea_name": idea_name})
 
-    # Стартовый кадр первого клипа — картинка первого бита (шаг 8).
+    # Стартовый кадр первого клипа — картинка первого бита (шаг 8). Она же — референс
+    # идентичности персонажа для QC всех битов.
     image_prompt_row = (fetch_rows("image_prompts", "scenario", scenario_id) or [{}])[0]
     image_prompt_id = image_prompt_row.get("id")
     images = fetch_rows("images", "image_prompt", image_prompt_id) if image_prompt_id else []
     if not images:
         print(f"\nSTATE 13 — no first-beat image for idea: {idea_name}, skipping")
         return _advance(state, 13, {"idea_id": idea_id, "idea_name": idea_name})
-    prev_frame = images[0]["key"]
+    ref_image = images[0]["key"]
+    prev_frame = ref_image
+    prev_end_frame = (
+        None  # текст-якорь стартового кадра: на бите 1 его нет (старт — картинка шага 8)
+    )
 
     # Биты в порядке сценария (как в s12): по сегментам, затем сортировка по id.
     segments = fetch_rows("audio_seg_prompts", "scenario", scenario_id)
@@ -653,16 +776,33 @@ def s13_generate_clips(state: ProjectState) -> dict:
         if not audio_beat:  # бит не озвучен (нет WAV) — клип не генерируем
             continue
         existing = fetch_rows("video_clips", "beat", b["id"])
-        if existing:  # клип уже сгенерирован — не перегенерируем
+        clip_path = None
+        if existing:  # клип уже сгенерирован — при включённом QC сперва ре-квалифицируем
             clip_path = existing[0]["key"]
-            skipped += 1
-        else:
-            clip_path = generate_beat_clip(
-                build_video_prompt_text(video_prompt[0]),
+            if CLIP_QC_MAX_ATTEMPTS > 0:
+                verdict = review_clip(
+                    clip_path, ref_image, float(audio_beat[0].get("duration") or 0.0)
+                )
+                if verdict.get("verdict") != "pass":
+                    print(
+                        f"STATE 13 — beat {b['id']}: existing clip failed QC "
+                        f"({verdict.get('reason', '')}), regenerating"
+                    )
+                    delete_video_clips_for_beats([b["id"]])
+                    clip_path = None
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
+        if clip_path is None:
+            clip_path = _generate_clip_with_qc(
+                video_prompt[0],
                 prev_frame,
-                audio_beat[0]["key"],
+                ref_image,
+                audio_beat[0],
                 idea_id,
                 b["id"],
+                prev_end_frame,
             )
             insert_video_clip("local", clip_path, "clip", b["id"])
             generated += 1
@@ -670,6 +810,9 @@ def s13_generate_clips(state: ProjectState) -> dict:
         prev_frame = extract_last_frame(
             clip_path, f"{VIDEOS_DIR}/frames/idea-{idea_id}-beat-{b['id']}-last.png"
         )
+        # end_frame текущего бита — текст-якорь стартового кадра для следующего (см. STARTING FRAME
+        # в build_video_prompt_text); работает и для пропущенных битов (строка несёт end_frame).
+        prev_end_frame = video_prompt[0].get("end_frame")
 
     update_idea_status(idea_id, "clips_generated")
     print(

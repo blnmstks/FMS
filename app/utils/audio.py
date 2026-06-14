@@ -1,3 +1,4 @@
+import math
 import wave
 from pathlib import Path
 
@@ -35,6 +36,22 @@ def wav_duration_seconds(path: str) -> float:
     # длине поданного аудиобита — иначе видео и звук рассинхронизируются.
     with wave.open(path, "rb") as wf:
         return wf.getnframes() / wf.getframerate()
+
+
+def pad_wav_to_duration(input_path: str, output_path: str, target_seconds: float) -> str:
+    # Дописывает тишину в ХВОСТ WAV до target_seconds (вход уже не короче цели → копия как есть,
+    # НЕ режет), создавая родительские директории. Возвращает output_path. Нужна шагу 13:
+    # длительность видео снапится вверх до 8n+1 кадров (ltx_snap_duration), а TrimAudioDuration
+    # в workflow умеет только резать — паддим WAV до snap-длительности, чтобы аудио- и
+    # видео-латенты совпали и речь никогда не обрезалась.
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    audio = AudioSegment.from_file(input_path)
+    deficit_ms = math.ceil(target_seconds * 1000 - len(audio))
+    if deficit_ms > 0:
+        audio += AudioSegment.silent(duration=deficit_ms, frame_rate=audio.frame_rate)
+    audio.export(str(out), format="wav")
+    return output_path
 
 
 def slice_wav(input_path: str, output_path: str, start_ms: float, end_ms: float) -> str:

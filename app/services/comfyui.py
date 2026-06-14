@@ -1,3 +1,5 @@
+import secrets
+import tempfile
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -7,13 +9,15 @@ from app.config import (
     COMFYUI_IMAGE_WORKFLOW,
     COMFYUI_VIDEO_AUDIO_NODE,
     COMFYUI_VIDEO_DURATION_NODE,
+    COMFYUI_VIDEO_FPS,
+    COMFYUI_VIDEO_FPS_NODE,
     COMFYUI_VIDEO_IMAGE_NODE,
     COMFYUI_VIDEO_PROMPT_NODE,
     COMFYUI_VIDEO_WORKFLOW,
     IMAGES_DIR,
     VIDEOS_DIR,
 )
-from app.db import IMAGE_PROMPT_FIELDS, VIDEO_PROMPT_FIELDS
+from app.db import IMAGE_PROMPT_FIELDS
 from app.infrastructure.comfyui_client import (
     download_image,
     get_history,
@@ -21,7 +25,13 @@ from app.infrastructure.comfyui_client import (
     upload_audio,
     upload_image,
 )
-from app.utils.audio import wav_duration_seconds
+from app.prompts.video_prompts import (
+    CAMERA_DISCIPLINE_BLOCK,
+    FINAL_FRAME_HOLD_SENTENCE,
+    STARTING_FRAME_LEAD_SENTENCE,
+)
+from app.utils.audio import pad_wav_to_duration, wav_duration_seconds
+from app.utils.video import ltx_snap_duration, mux_clip_audio
 from app.utils.workflow import load_workflow, set_node_input
 
 # Дефолт под медленные модели (Flux: загрузка модели + сэмплинг легко дольше 30с).
@@ -117,14 +127,46 @@ def generate_first_beat_image(image_prompt: dict, idea_id: int) -> str:
     return generate_image(COMFYUI_IMAGE_WORKFLOW, prompt_text, COMFYUI_IMAGE_PROMPT_NODE, out)
 
 
-def build_video_prompt_text(video_beat_prompt: dict) -> str:
-    # Объединяет непустые поля видео-промпта бита в порядке VIDEO_PROMPT_FIELDS через ", "
-    # (как build_prompt_text). Лишние ключи строки БД (id/beat) игнорируются. Изолирована
-    # намеренно — точная «сцепка» промпта будет дорабатываться.
-    parts = [
-        str(video_beat_prompt[f]).strip() for f in VIDEO_PROMPT_FIELDS if video_beat_prompt.get(f)
-    ]
-    return ", ".join(parts)
+def build_video_prompt_text(video_beat_prompt: dict, prev_end_frame: str | None = None) -> str:
+    # Для I2V стартовый кадр, финальный кадр и дисциплина камеры — отдельные обязательные
+    # инструкции. prev_end_frame (end_frame ПРЕДЫДУЩЕГО бита) — буквальный входной freeze этого
+    # клипа (frame 0): блок STARTING FRAME велит LTX начать движение ровно из него (поза/руки/
+    # реквизит/мимика), а не «прыгнуть» в готовое состояние — код-уровневый якорь сцепки субъекта
+    # (на первом бите prev_end_frame=None — старт это картинка шага 8, блока нет). Финальный кадр
+    # станет входом следующего клипа, а камер-блок — код-уровневая гарантия «tripod-first» на каждый
+    # клип (стык битов — стоп-кадр: бесшовно сцепляются только статичные состояния), независимая от
+    # того, насколько дисциплинированно LLM шага 12 описала камеру. Финальный кадр закрепляется
+    # УТВЕРДИТЕЛЬНОЙ hold-фразой; запретительных списков в позитивном промпте нет (видеомодель не
+    # понимает отрицаний — токены работали как призыв нарисовать запрещённое).
+
+    starting_frame = str(prev_end_frame or "").strip()
+    video_prompt = str(video_beat_prompt.get("video_prompt") or "").strip()
+    end_frame = str(video_beat_prompt.get("end_frame") or "").strip()
+    parts = []
+    if starting_frame:
+        parts.append(f"STARTING FRAME\n{STARTING_FRAME_LEAD_SENTENCE}\n{starting_frame}")
+    if video_prompt:
+        parts.append(f"SHOT ACTION\n{video_prompt}")
+    if end_frame:
+        parts.append(f"MANDATORY FINAL FRAME\n{end_frame}\n{FINAL_FRAME_HOLD_SENTENCE}")
+    if video_prompt:
+        parts.append(CAMERA_DISCIPLINE_BLOCK)
+    return "\n\n".join(parts)
+
+
+def _patch_noise_seeds(workflow: dict, beat_id: int, seed: int | None) -> None:
+    # Всем нодам RandomNoise — свежие сиды (base+i по нодам в порядке id). Хардкод-сиды из
+    # JSON-экспорта не должны доезжать до сервера никогда: одинаковый шум на всех битах давал
+    # повторяющиеся артефакты, а ретрай в точности воспроизводил тот же брак. Явный seed —
+    # детерминированный повтор; печать — чтобы удачный сид можно было воспроизвести.
+    base = seed if seed is not None else secrets.randbits(48)
+    noise_nodes = sorted(
+        nid for nid, node in workflow.items() if node.get("class_type") == "RandomNoise"
+    )
+    for i, nid in enumerate(noise_nodes):
+        set_node_input(workflow, nid, "noise_seed", base + i)
+    seeds = ", ".join(f"{nid}={base + i}" for i, nid in enumerate(noise_nodes))
+    print(f"[comfyui] beat {beat_id}: noise seeds {seeds}")
 
 
 def generate_beat_clip(
@@ -135,31 +177,53 @@ def generate_beat_clip(
     beat_id: int,
     poll_interval: float = 1.0,
     timeout: float = DEFAULT_VIDEO_TIMEOUT,
+    seed: int | None = None,
 ) -> str:
     # Бизнес-логика шага 13: генерирует видео-клип одного бита через ComfyUI (workflow/ноды из
-    # конфига). Подаёт промпт, первый кадр (заливка через upload_image), аудиобит (upload_audio)
-    # и его ТОЧНУЮ длину из самого файла (длина видео = длина аудио, без рассинхрона). Сохраняет
-    # результат под VIDEOS_DIR/clips (расширение — из имени файла ComfyUI, иначе .mp4). Путь.
+    # конфига). Подаёт промпт, первый кадр (заливка через upload_image) и аудиобит, ПАДДИРОВАННЫЙ
+    # тишиной до snap-длительности (кадры LTX = 8n+1, snap только вверх: видео никогда не короче
+    # речи, а сырую длину модель молча резала вниз — хвост реплики обрезался бы). После скачивания
+    # дорожка клипа заменяется на этот же WAV (выход ComfyUI — голос после Audio-VAE-нейрокодека),
+    # заодно срезаются метаданные с полным ComfyUI-графом. Сохраняет под VIDEOS_DIR/clips
+    # (расширение — из имени файла ComfyUI, иначе .mp4). Возвращает путь.
     workflow = load_workflow(COMFYUI_VIDEO_WORKFLOW)
     set_node_input(workflow, COMFYUI_VIDEO_PROMPT_NODE, "value", prompt_text)
+    # Печатаем финальный positive prompt ровно в том виде, в каком он лёг в prompt-ноду и уйдёт
+    # на сервер — чтобы наглядно видеть, что собрал build_video_prompt_text на каждый бит.
+    print(f"\n[comfyui] beat {beat_id} — POSITIVE PROMPT → node {COMFYUI_VIDEO_PROMPT_NODE}")
+    print("-" * 70)
+    print(workflow[COMFYUI_VIDEO_PROMPT_NODE]["inputs"]["value"])
+    print("-" * 70)
 
     frame_name = upload_image(first_frame_path)["name"]
     set_node_input(workflow, COMFYUI_VIDEO_IMAGE_NODE, "image", frame_name)
 
-    audio_name = upload_audio(audio_path)["name"]
-    set_node_input(workflow, COMFYUI_VIDEO_AUDIO_NODE, "audio", audio_name)
+    # fps берём из конфига (гайд LTX-2: 48–60 для плавности) и патчим в ноду Frame Rate; та же
+    # частота идёт в snap-математику, чтобы кадры остались валидными (8n+1) и совпали с нодой.
+    set_node_input(workflow, COMFYUI_VIDEO_FPS_NODE, "value", COMFYUI_VIDEO_FPS)
+    snapped = ltx_snap_duration(wav_duration_seconds(audio_path), COMFYUI_VIDEO_FPS)
+    set_node_input(workflow, COMFYUI_VIDEO_DURATION_NODE, "value", snapped)
 
-    set_node_input(workflow, COMFYUI_VIDEO_DURATION_NODE, "value", wav_duration_seconds(audio_path))
+    _patch_noise_seeds(workflow, beat_id, seed)
 
-    prompt_id = queue_prompt(workflow, uuid4().hex)
-    clip_info = _wait_for_output(prompt_id, poll_interval, timeout)
+    padded_wav = str(Path(tempfile.gettempdir()) / f"fms-beat-{beat_id}-{uuid4().hex}.wav")
+    try:
+        pad_wav_to_duration(audio_path, padded_wav, snapped)
+        audio_name = upload_audio(padded_wav)["name"]
+        set_node_input(workflow, COMFYUI_VIDEO_AUDIO_NODE, "audio", audio_name)
 
-    data = download_image(clip_info["filename"], clip_info["subfolder"], clip_info["type"])
-    ext = Path(clip_info["filename"]).suffix or ".mp4"
-    name = f"idea-{idea_id}-beat-{beat_id}-{time.strftime('%Y%m%d-%H%M%S')}{ext}"
-    out = Path(VIDEOS_DIR) / "clips" / name
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(data)
+        prompt_id = queue_prompt(workflow, uuid4().hex)
+        clip_info = _wait_for_output(prompt_id, poll_interval, timeout)
+
+        data = download_image(clip_info["filename"], clip_info["subfolder"], clip_info["type"])
+        ext = Path(clip_info["filename"]).suffix or ".mp4"
+        name = f"idea-{idea_id}-beat-{beat_id}-{time.strftime('%Y%m%d-%H%M%S')}{ext}"
+        out = Path(VIDEOS_DIR) / "clips" / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        mux_clip_audio(str(out), padded_wav)
+    finally:
+        Path(padded_wav).unlink(missing_ok=True)
     return str(out)
 
 

@@ -1383,6 +1383,36 @@ def test_replace_video_prompts_empty_list_only_deletes(mock_psycopg_connect):
     mock_conn.commit.assert_called_once()
 
 
+# --- update_video_beat_prompt ---
+
+
+@pytest.mark.unit
+def test_update_video_beat_prompt_executes_update_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import update_video_beat_prompt
+
+    update_video_beat_prompt(42, "vp2", "ef2")
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("UPDATE video_beat_prompts" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_update_video_beat_prompt_passes_params_in_order(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import update_video_beat_prompt
+
+    update_video_beat_prompt(42, "vp2", "ef2")
+
+    update_call = next(
+        c for c in mock_cursor.execute.call_args_list if "UPDATE video_beat_prompts" in str(c)
+    )
+    assert update_call.args[1] == ("vp2", "ef2", 42)
+
+
 # --- RELATION_EDGES: video_beat_prompts ---
 
 
@@ -1456,6 +1486,36 @@ def test_insert_video_clip_passes_params(mock_psycopg_connect):
     )
     assert insert_call.args[1] == ("local", "clips/idea-7-beat-42-ts.mp4", "clip", 42)
     assert insert_call.args[1][-1] == 42
+
+
+# --- delete_video_clips_for_beats ---
+
+
+@pytest.mark.unit
+def test_delete_video_clips_for_beats_executes_delete_and_commits(mock_psycopg_connect):
+    _, mock_conn, mock_cursor = mock_psycopg_connect
+
+    from app.db import delete_video_clips_for_beats
+
+    delete_video_clips_for_beats([1, 2, 3])
+
+    calls = [str(c) for c in mock_cursor.execute.call_args_list]
+    assert any("DELETE FROM video_clips" in c for c in calls)
+    mock_conn.commit.assert_called_once()
+
+
+@pytest.mark.unit
+def test_delete_video_clips_for_beats_passes_beat_ids_as_param(mock_psycopg_connect):
+    _, _, mock_cursor = mock_psycopg_connect
+
+    from app.db import delete_video_clips_for_beats
+
+    delete_video_clips_for_beats([1, 2, 3])
+
+    delete_call = next(
+        c for c in mock_cursor.execute.call_args_list if "DELETE FROM video_clips" in str(c)
+    )
+    assert delete_call.args[1] == ([1, 2, 3],)
 
 
 # --- RELATION_EDGES: video_clips ---

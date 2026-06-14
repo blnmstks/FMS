@@ -321,7 +321,12 @@
 - **генерация** (нет `existing` ИЛИ выбран «2»): `visual_row = (fetch_rows("visual_styles","idea",
   idea_id) or [{}])[0]`, `visual_style = {f: visual_row.get(f) for f in VISUAL_STYLE_FIELDS}`;
   `characters = fetch_rows("characters_sheet","scenario", scenario_id)`;
-  `result = generate_video_prompts(scenario_text, visual_style, characters, beat_inputs)`;
+  **граундинг бита 1**: картинка шага 8 по цепочке `image_prompts`(scenario) → `images`
+  (`first_beat_image = images[0]["key"]`, нет — `None`) и поля её image-prompt'а
+  (`{f: row.get(f) for f in IMAGE_PROMPT_FIELDS}`, нет строки — `None`) — LLM обязана видеть
+  реальный входной кадр первого клипа, иначе промпт бита 1 пере-ставляет сцену (морф на idea-1);
+  `result = generate_video_prompts(scenario_text, visual_style, characters, beat_inputs,
+  first_beat_image_path=first_beat_image, image_prompt=image_prompt_fields)`;
   `replace_video_prompts(result.get("beats") or [], scenario_id)`, затем
   `update_idea_status(idea_id, "video_prompts_finished")` (статус — строго ПОСЛЕ записи);
 - `_advance(state, 12, {idea_id, idea_name})`.
@@ -347,33 +352,95 @@
 
 ## `s13_generate_clips(state)` — шаг 13
 Берёт идею со статусом `video_prompts_finished` и генерирует видео-клип на КАЖДЫЙ озвученный
-бит через ComfyUI (LTX-2.3, сервис `generate_beat_clip`), сцепляя клипы по последнему кадру.
-Самодостаточный, полностью автоматический (без `interrupt`). Статус → `clips_generated` строго
-ПОСЛЕ успешной генерации и записи всех клипов.
+бит через ComfyUI (LTX-2.3, сервис `generate_beat_clip`), сцепляя клипы по последнему кадру и
+пропуская каждый клип через QC-гейт (`review_clip`, vision-LLM). Гейт — главная защита сцепки:
+один бракованный финальный кадр (лицо закрыто, торс без головы) заражает все следующие биты
+(наблюдалось на idea-1: бит 4 «восстановился» другим персонажем). Самодостаточный, полностью
+автоматический (без `interrupt`). Статус → `clips_generated` строго ПОСЛЕ успешной генерации,
+QC и записи всех клипов.
 
 Логика:
 - идеи нет → `_advance(state, 13)`;
 - нет сценария (`fetch_rows("scenarios", "idea", …)`→`[]`) → advance без смены статуса;
 - стартовый кадр первого клипа — картинка шага 8 (`images.key`, цепочка scenario →
-  `image_prompts` → `images`). Нет картинки → лог и advance БЕЗ смены статуса;
+  `image_prompts` → `images`); она же — референс идентичности `ref_image` для QC всех битов.
+  Нет картинки → лог и advance БЕЗ смены статуса;
 - биты собираются в порядке сценария (как в s12: по `audio_seg_prompts` → `audio_beat_prompts`,
   затем `sort` по `id`);
-- `prev_frame = images[0]["key"]`; по каждому биту по порядку:
+- `prev_frame = ref_image`; `prev_end_frame = None` (старт первого бита — картинка шага 8, без
+  текст-якоря); по каждому биту по порядку:
   - нет `video_beat_prompts` для бита → `continue`; нет `audio_beats` (силент-бит) → `continue`;
-  - если в `video_clips` уже есть строка бита → `clip_path = key`, `skipped++` (не перегенерируем);
-    иначе `clip_path = generate_beat_clip(build_video_prompt_text(vbp), prev_frame,
-    audio_beats.key, idea_id, beat_id)`, затем `insert_video_clip("local", clip_path, "clip",
-    beat_id)`, `generated++`;
+  - существующий клип (resume): при `CLIP_QC_MAX_ATTEMPTS > 0` он СНАЧАЛА проходит
+    `review_clip(key, ref_image, duration)`; `pass` → `clip_path = key`, `skipped++`;
+    `fail` → `delete_video_clips_for_beats([beat_id])` и перегенерация (битый хвост не должен
+    заражать цепочку при повторном прогоне). При `CLIP_QC_MAX_ATTEMPTS == 0` — как раньше:
+    `clip_path = key`, `skipped++` без проверки;
+  - перегенерация/генерация — `_generate_clip_with_qc(video_prompt_row, prev_frame, ref_image,
+    audio_beat, idea_id, beat_id, prev_end_frame)` (см. ниже; на вход идёт СТРОКА БД
+    `video_beat_prompts[0]`, а не собранный текст — чтобы хелпер мог пересобрать его после
+    self-repair; `prev_end_frame` — `end_frame` ПРЕДЫДУЩЕГО бита, текст-якорь стартового кадра),
+    затем `insert_video_clip("local", clip_path, "clip", beat_id)`, `generated++` — запись в БД
+    ТОЛЬКО после прохождения QC;
   - `prev_frame = extract_last_frame(clip_path, VIDEOS_DIR/frames/idea-<id>-beat-<id>-last.png)`
     (последний кадр извлекается и для пропущенных клипов — сцепка не рвётся на resume);
+  - `prev_end_frame = video_prompt_row.get("end_frame")` — `end_frame` ТЕКУЩЕГО бита становится
+    текст-якорем стартового кадра для СЛЕДУЮЩЕГО бита (работает и для пропущенных: строка несёт
+    `end_frame`);
 - `update_idea_status(idea_id, "clips_generated")`; `_advance(state, 13, {idea_id, idea_name})`.
+
+### `_generate_clip_with_qc(video_prompt_row, prev_frame, ref_image, audio_beat, idea_id, beat_id, prev_end_frame=None)`
+Двухуровневый цикл генерации одного бита с QC-гейтом и self-repair промпта:
+- `CLIP_QC_MAX_ATTEMPTS == 0` → одна генерация без QC (поведение до гейта), текст собирается из
+  `video_prompt_row` через `build_video_prompt_text(video_prompt_row, prev_end_frame)`;
+- `prev_end_frame` (`end_frame` предыдущего бита) пробрасывается насквозь в ОБА вызова
+  `build_video_prompt_text` как текст-якорь стартового кадра (блок STARTING FRAME); self-repair
+  правит `end_frame` ТЕКУЩЕГО бита (якорь для следующего) — на стартовый якорь текущего клипа не
+  влияет;
+- иначе берётся копия `row` строки БД (её `video_prompt`/`end_frame` правит improve по ходу) и
+  идёт цикл `for improve_round in range(CLIP_QC_MAX_IMPROVE_ROUNDS + 1)` (раунд 0 — исходный
+  промпт, далее улучшенные):
+  - текст раунда — `build_video_prompt_text(row, prev_end_frame)`; внутри раунда
+    `CLIP_QC_MAX_ATTEMPTS` сид-попыток:
+    `generate_beat_clip(...)` (свежий сид внутри сервиса) → `review_clip(clip, ref_image, duration)`;
+  - `verdict == "pass"` → `_cleanup_failed_artifacts(failed_clips)` (убрать зафейленные попытки
+    с диска) и вернуть клип; иначе путь клипа копится в `failed_clips`, лог;
+  - ВСЕ попытки стартуют с `prev_frame` — он валиден по построению (прошёл QC предыдущего бита);
+    `ref_image` (картинка шага 8) — ТОЛЬКО эталон идентичности для `review_clip`, не стартовый кадр;
+  - сиды раунда исчерпаны и `improve_round < CLIP_QC_MAX_IMPROVE_ROUNDS` → self-repair:
+    `repair_video_prompt(row.video_prompt, row.end_frame, verdict)` (причина отказа QC → LLM
+    переписывает оба поля), `row` обновляется, `update_video_beat_prompt(beat_id, …)` пишет правку
+    в БД, и следующий раунд идёт уже с улучшенным промптом;
+- все раунды исчерпаны → `RuntimeError` (статус идеи не двигается, брак в `video_clips` не пишется;
+  зафейленные файлы НЕ убираются — остаются для ручного разбора; улучшенный промпт остаётся в БД,
+  resume продолжит с него).
+
+### `_cleanup_failed_artifacts(failed_clips)`
+Пустой список → no-op. Иначе удаляет (`delete_files`) сами зафейленные клипы + их QC-кадры
+(`qc_frame_paths(clip)`). Успешный клип и кадр сцепки (`frames/idea-…-last.png`) не трогаются.
 
 ### Test cases
 - генерирует по порядку (101, 102), первый бит стартует с картинки шага 8, вход бита 102 — кадр,
   извлечённый из клипа 101; `insert_video_clip` на каждый, статус `clips_generated`,
-  `pipeline_step == 14`, `13 in executed_steps`
-- идемпотентность: бит с существующим `video_clips` не идёт в `generate_beat_clip`/
+  `pipeline_step == 14`, `13 in executed_steps` (`review_clip` замокан на `pass`)
+- идемпотентность: бит с существующим `video_clips` (QC pass) не идёт в `generate_beat_clip`/
   `insert_video_clip`, но `extract_last_frame` для него вызывается (из `key` существующего клипа)
+- ретрай: QC fail → pass на втором вызове → `generate_beat_clip` дважды для бита,
+  `insert_video_clip` один раз (после pass)
+- старт всегда с `prev_frame`: `CLIP_QC_MAX_ATTEMPTS=3`, бит 102 дважды fail → ВСЕ три попытки
+  стартуют с одного и того же кадра предыдущего бита (не с `ref_image`/картинки шага 8)
+- self-repair: сиды раунда 0 исчерпаны → `repair_video_prompt` вызван с причиной отказа,
+  `update_video_beat_prompt(beat_id, new_vp, new_ef)`, раунд 1 собирает текст из НОВОГО промпта,
+  при pass — `insert_video_clip`, статус `clips_generated`
+- cleanup: бит прошёл со 2-й попытки → `delete_files` вызван с зафейленным клипом и его QC-кадром;
+  успешный клип НЕ в списке удаления
+- финальный провал: раунды improve исчерпаны → `RuntimeError`; `repair_video_prompt`/
+  `update_video_beat_prompt` вызваны (правка осталась в БД), но `insert_video_clip`/
+  `update_idea_status`/`delete_files` НЕ вызваны
+- `CLIP_QC_MAX_IMPROVE_ROUNDS=0` → после сид-попыток сразу `RuntimeError`, `repair_video_prompt`
+  не вызывается (старое поведение «после сидов стоп»)
+- resume-QC: существующий клип fail → `delete_video_clips_for_beats([beat_id])`, перегенерация,
+  `insert_video_clip` после pass
+- `CLIP_QC_MAX_ATTEMPTS=0` → `review_clip` не вызывается вовсе (старое поведение)
 - биты без `video_beat_prompts` или без `audio_beats` пропускаются
 - идеи нет / нет сценария / нет картинки шага 8 → `generate_beat_clip`/`update_idea_status` не
   вызваны, advance на шаг 14
